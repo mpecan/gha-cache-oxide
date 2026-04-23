@@ -12,6 +12,10 @@ async fn main() -> anyhow::Result<()> {
         .context("loading configuration from environment")?;
     gha_cache_oxide::init_tracing(config.log_format).context("initialising tracing subscriber")?;
 
+    // Debug-format the whole config — Secret fields redact themselves, so
+    // this is safe. Drop to info so it surfaces at the default log level.
+    tracing::info!(?config, "resolved configuration");
+
     let app = gha_cache_oxide::build_app();
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = TcpListener::bind(addr)
