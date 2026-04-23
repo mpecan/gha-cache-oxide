@@ -386,6 +386,96 @@ async fn empty_scopes_returns_none() {
 }
 
 #[tokio::test]
+async fn prefix_match_with_identical_updated_at_still_returns_a_row() {
+    // With `ORDER BY updatedAt DESC LIMIT 1` and equal timestamps,
+    // SQLite is free to pick either candidate (non-deterministic by
+    // design — upstream has the same property via Kysely's
+    // `executeTakeFirst()`). Pin the contract that SOME row comes back
+    // and that it belongs to the seeded set; do not pin which one.
+    let db = test_db().await;
+    let a = seed(&db, "build-cache-a", 1_000).await;
+    let b = seed(&db, "build-cache-b", 1_000).await;
+
+    let m = db
+        .match_cache_entry(req("build-cache", &[], &["s"]))
+        .await
+        .unwrap()
+        .expect("at least one of the two should match");
+    assert_eq!(m.match_type, MatchType::PrefixedPrimary);
+    assert!(
+        m.entry.id == a || m.entry.id == b,
+        "got {} but expected one of the two seeded rows",
+        m.entry.id
+    );
+}
+
+#[tokio::test]
+async fn empty_string_primary_key_matches_any_row_in_scope() {
+    // Empty primary key becomes `LIKE '%'` after prefix-wildcard append,
+    // which matches every row in the scope. Mirrors upstream's SQL
+    // semantics — pin so a future handler-level guard against empty
+    // keys has to be an explicit choice, not an accidental consequence
+    // of this query.
+    let db = test_db().await;
+    let hit = seed(&db, "anything", 1_000).await;
+
+    let m = db
+        .match_cache_entry(req("", &[], &["s"]))
+        .await
+        .unwrap()
+        .expect("empty primary key should prefix-match any row in scope");
+    assert_eq!(m.match_type, MatchType::PrefixedPrimary);
+    assert_eq!(m.entry.id, hit);
+}
+
+#[tokio::test]
+async fn empty_string_scope_and_repo_id_are_matched_literally() {
+    // The schema allows empty-string scope / repo_id (see
+    // queries_tests.rs::empty_string_coords_round_trip). Verify the
+    // match path treats them as literal equality rather than a
+    // wildcard.
+    let db = test_db().await;
+    let hit = seed_entry(
+        &db,
+        Seed {
+            key: "k",
+            version: "v1",
+            scope: "",
+            repo_id: "",
+            updated_at_ms: 1_000,
+        },
+    )
+    .await;
+
+    let m = db
+        .match_cache_entry(MatchRequest {
+            primary_key: "k",
+            restore_keys: &[],
+            version: "v1",
+            scopes: &[""],
+            repo_id: "",
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.match_type, MatchType::ExactPrimary);
+    assert_eq!(m.entry.id, hit);
+
+    // Non-empty scope must miss.
+    let out = db
+        .match_cache_entry(MatchRequest {
+            primary_key: "k",
+            restore_keys: &[],
+            version: "v1",
+            scopes: &["s"],
+            repo_id: "",
+        })
+        .await
+        .unwrap();
+    assert!(out.is_none());
+}
+
+#[tokio::test]
 async fn cross_scope_restore_match_continues_when_first_scope_misses_entirely() {
     // The interesting branch interaction: scope[0] yields no primary AND
     // no restore-key hit, so `walk_restore_keys` returns None for that

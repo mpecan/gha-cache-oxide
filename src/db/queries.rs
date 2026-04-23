@@ -272,7 +272,7 @@ fn escape_like_pattern(value: &str) -> String {
 }
 
 /// Scope of a single-query lookup inside `match_cache_entry`. Grouped so
-/// `find_exact_in_scope` / `find_prefix_in_scope` stay at three args.
+/// `find_entry_by_exact_key` / `find_entry_by_prefix_key` stay at three args.
 struct ScopeQuery<'a> {
     version: &'a str,
     scope: &'a str,
@@ -310,11 +310,17 @@ impl Db {
                 repo_id: req.repo_id,
             };
 
-            if let Some(entry) = self.find_exact_in_scope(req.primary_key, &q).await? {
-                return Ok(Some(tag(entry, MatchType::ExactPrimary)));
+            if let Some(entry) = self.find_entry_by_exact_key(req.primary_key, &q).await? {
+                return Ok(Some(MatchedEntry {
+                    entry,
+                    match_type: MatchType::ExactPrimary,
+                }));
             }
-            if let Some(entry) = self.find_prefix_in_scope(req.primary_key, &q).await? {
-                return Ok(Some(tag(entry, MatchType::PrefixedPrimary)));
+            if let Some(entry) = self.find_entry_by_prefix_key(req.primary_key, &q).await? {
+                return Ok(Some(MatchedEntry {
+                    entry,
+                    match_type: MatchType::PrefixedPrimary,
+                }));
             }
             if req.restore_keys.is_empty() {
                 return Ok(None);
@@ -332,17 +338,23 @@ impl Db {
         q: &ScopeQuery<'_>,
     ) -> Result<Option<MatchedEntry>, sqlx::Error> {
         for rk in restore_keys {
-            if let Some(entry) = self.find_exact_in_scope(rk, q).await? {
-                return Ok(Some(tag(entry, MatchType::ExactRestore)));
+            if let Some(entry) = self.find_entry_by_exact_key(rk, q).await? {
+                return Ok(Some(MatchedEntry {
+                    entry,
+                    match_type: MatchType::ExactRestore,
+                }));
             }
-            if let Some(entry) = self.find_prefix_in_scope(rk, q).await? {
-                return Ok(Some(tag(entry, MatchType::PrefixedRestore)));
+            if let Some(entry) = self.find_entry_by_prefix_key(rk, q).await? {
+                return Ok(Some(MatchedEntry {
+                    entry,
+                    match_type: MatchType::PrefixedRestore,
+                }));
             }
         }
         Ok(None)
     }
 
-    async fn find_exact_in_scope(
+    async fn find_entry_by_exact_key(
         &self,
         key: &str,
         q: &ScopeQuery<'_>,
@@ -360,7 +372,7 @@ impl Db {
         .await
     }
 
-    async fn find_prefix_in_scope(
+    async fn find_entry_by_prefix_key(
         &self,
         key: &str,
         q: &ScopeQuery<'_>,
@@ -378,10 +390,6 @@ impl Db {
         .fetch_optional(&self.pool)
         .await
     }
-}
-
-const fn tag(entry: CacheEntry, match_type: MatchType) -> MatchedEntry {
-    MatchedEntry { entry, match_type }
 }
 
 #[cfg(test)]
