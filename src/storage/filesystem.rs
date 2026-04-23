@@ -56,7 +56,15 @@ impl StorageAdapter for FilesystemAdapter {
     async fn upload_stream(&self, object_name: &str, body: ByteStream) -> Result<(), StorageError> {
         validate_object_name(object_name)?;
         let path = ObjectPath::from(object_name);
-        let mut writer = BufWriter::new(self.store.clone(), path);
+        // BufWriter defaults to `capacity=10 MiB, max_concurrency=8`, which
+        // holds up to 80 MiB of in-flight parts in memory. That's tuned for
+        // cloud backends where concurrent part uploads win latency — on
+        // LocalFileSystem the writer just renames a temp file, so serial
+        // writes are equally fast and the concurrent buffers are pure
+        // overhead. We cap at `max_concurrency=1` to keep peak memory
+        // ≤ capacity, matching the bounded-memory streaming contract
+        // asserted by `tests/streaming_memory.rs`.
+        let mut writer = BufWriter::new(self.store.clone(), path).with_max_concurrency(1);
         let mut stream = body;
         while let Some(chunk) = stream.next().await {
             writer.write_all(&chunk?).await?;

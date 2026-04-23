@@ -20,6 +20,7 @@ path = "src/lib.rs"
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
+base64 = "0.22"
 bytes = "1"
 futures = "0.3"
 jsonwebtoken = "9"
@@ -39,7 +40,6 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-base64 = "0.22"
 proptest = "1"
 rsa = "0.9"
 tempfile = "3"
