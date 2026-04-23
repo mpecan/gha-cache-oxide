@@ -319,6 +319,47 @@ pub mod scenarios {
             Ok(_) => panic!("expected Err, got Ok"),
         }
     }
+
+    /// Each trait method routes its name through `validate_object_name`
+    /// before touching the backend; empty names must round-trip the
+    /// dedicated `InvalidObjectName { reason: "empty" }` variant. Pins
+    /// the invariant at the trait boundary so a future driver can't
+    /// short-circuit validation.
+    ///
+    /// `download_stream` is matched (not `unwrap_err`'d) because
+    /// `ByteStream` does not implement `Debug`.
+    pub async fn rejects_empty_object_name(h: &Harness) {
+        fn assert_empty(err: &StorageError, call: &str) {
+            match err {
+                StorageError::InvalidObjectName {
+                    reason: "empty", ..
+                } => {}
+                other => panic!("{call}: expected InvalidObjectName(empty), got {other:?}"),
+            }
+        }
+
+        let upload_err = h
+            .adapter
+            .upload_stream("", bytes_stream(b"x".to_vec()))
+            .await
+            .unwrap_err();
+        assert_empty(&upload_err, "upload_stream");
+
+        match h.adapter.download_stream("").await {
+            Err(e) => assert_empty(&e, "download_stream"),
+            Ok(_) => panic!("download_stream(\"\") should error"),
+        }
+
+        assert_empty(
+            &h.adapter.delete_folder("").await.unwrap_err(),
+            "delete_folder",
+        );
+        assert_empty(
+            &h.adapter.count_files_in_folder("").await.unwrap_err(),
+            "count_files_in_folder",
+        );
+        assert_empty(&h.adapter.signed_url("").await.unwrap_err(), "signed_url");
+    }
 }
 
 // ------------------------------------------------------------------------
@@ -363,6 +404,7 @@ pub async fn run_conformance_suite(adapter: Arc<dyn StorageAdapter>, signs_urls:
     run!(prefix_matching_is_segment_aware);
     run!(signed_url_matches_capability);
     run!(signed_url_validates_object_name);
+    run!(rejects_empty_object_name);
 }
 
 // ------------------------------------------------------------------------
@@ -373,6 +415,12 @@ pub async fn run_conformance_suite(adapter: Arc<dyn StorageAdapter>, signs_urls:
 // The scenario list is passed as a trailing token sequence so the same
 // macro expansion drives every driver; the repetition group (`$(...)+`)
 // avoids nesting a helper macro, which would lose access to `$setup`.
+//
+// Note for future drivers: setup is infallible here — filesystem only
+// needs `TempDir::new()`. An S3 setup that needs live creds should
+// panic on failure under `#[ignore]` (run with `cargo test -- --ignored`,
+// per CLAUDE.md), matching the pattern the constitution already uses
+// for tests that require external services.
 // ------------------------------------------------------------------------
 
 macro_rules! storage_conformance_cases {
@@ -410,6 +458,7 @@ storage_conformance_cases!(
     prefix_matching_is_segment_aware,
     signed_url_matches_capability,
     signed_url_validates_object_name,
+    rejects_empty_object_name,
 );
 
 // ------------------------------------------------------------------------
