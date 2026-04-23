@@ -297,10 +297,17 @@ pub async fn capture_envelope(
         }
     }
 
+    // Fail loudly on invalid JSON — collapsing to `null` would let a
+    // broken serialization regression slip past the golden check.
     let body = if bytes.is_empty() {
         Value::Null
     } else if body_is_json {
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "expected JSON body, got error {e}; preview: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        })
     } else {
         json!({ "body_len": bytes.len() })
     };
@@ -314,16 +321,11 @@ pub async fn capture_envelope(
 }
 
 /// Recursively rewrites dynamic values to stable placeholders so goldens
-/// don't change between runs:
-///
-/// - integer `upload_id` (in numeric or stringified form) → `"{upload_id}"`
-/// - any substring equal to the cache-entry UUID → `"{cache_entry_id}"`
-/// - any substring in a URL matching `/devstoreaccount1/upload/<n>`
-///   → `/devstoreaccount1/upload/{upload_id}`
-/// - any substring in a URL matching `/download/<uuid>`
-///   → `/download/{cache_entry_id}`
-/// - `x-ms-request-id` header values (UUID) → `"{request_id}"`
-/// - the server base URL (`http://127.0.0.1:<port>`) → `"{base_url}"`
+/// don't change between runs. Replacements: numeric / stringified
+/// `upload_id` → `<UPLOAD_ID>`; cache-entry UUID → `<CACHE_ENTRY_ID>`;
+/// `x-ms-request-id` header values → `<REQUEST_ID>`; server base URL
+/// → `<BASE_URL>`. URL substrings for upload/download paths are
+/// replaced wholesale so the surrounding URL stays readable.
 pub fn normalize(value: Value, base_url: &str, dynamics: &Dynamics) -> Value {
     normalize_inner(value, base_url, dynamics, None)
 }

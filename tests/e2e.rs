@@ -82,10 +82,7 @@ async fn step_upload_part(srv: &ServerHandle, upload_id: i64, d: &Dynamics) {
     let resp = put_bytes(srv, &path, PAYLOAD.to_vec()).await;
     let (status, envelope) = capture_envelope(resp, &["x-ms-request-id"], false).await;
     assert_eq!(status, 201, "PUT upload must return 201");
-    assert_golden(
-        "upload_part_blocklist",
-        &normalize(envelope, &srv.base_url, d),
-    );
+    assert_golden("upload_part_block", &normalize(envelope, &srv.base_url, d));
 }
 
 async fn step_finalize(srv: &ServerHandle, upload_id: i64, d: &Dynamics) {
@@ -198,4 +195,121 @@ fn dropping_a_field_fails_with_meaningful_diff() {
 fn identical_values_compare_equal() {
     let v = json!({ "ok": true, "n": 3, "xs": [1, 2, 3] });
     compare_to_golden_value(&v, &v, "synthetic_equal");
+}
+
+/// Targeted unit tests for `normalize` / `compare_to_golden_value`.
+/// Without these, the normalizer's branches (numeric `upload_id`,
+/// stringified `upload_id`, URL substring, `x-ms-request-id` header,
+/// `cache_entry_id` substring) are only exercised transitively by the
+/// round-trip — so a regression in one branch could hide behind passing
+/// goldens on the others.
+#[cfg(test)]
+mod normalize_tests {
+    use super::*;
+
+    fn with(upload_id: i64, cache_entry_id: &str) -> Dynamics {
+        Dynamics {
+            upload_id: Some(upload_id),
+            cache_entry_id: Some(cache_entry_id.to_string()),
+        }
+    }
+
+    #[test]
+    fn numeric_upload_id_is_replaced() {
+        let v = json!({ "n": 42_i64 });
+        let out = normalize(v, "http://b", &with(42, "abc"));
+        assert_eq!(out, json!({ "n": "<UPLOAD_ID>" }));
+    }
+
+    #[test]
+    fn stringified_upload_id_is_replaced() {
+        let v = json!({ "entry_id": "42" });
+        let out = normalize(v, "http://b", &with(42, "abc"));
+        assert_eq!(out, json!({ "entry_id": "<UPLOAD_ID>" }));
+    }
+
+    #[test]
+    fn upload_url_substring_is_replaced() {
+        let v = json!({
+            "signed_upload_url": "http://b/devstoreaccount1/upload/42"
+        });
+        let out = normalize(v, "http://b", &with(42, "abc"));
+        assert_eq!(
+            out,
+            json!({
+                "signed_upload_url":
+                    "<BASE_URL>/devstoreaccount1/upload/<UPLOAD_ID>"
+            })
+        );
+    }
+
+    #[test]
+    fn download_url_substring_is_replaced() {
+        let v = json!({ "signed_download_url": "http://b/download/abc" });
+        let out = normalize(v, "http://b", &with(42, "abc"));
+        assert_eq!(
+            out,
+            json!({ "signed_download_url": "<BASE_URL>/download/<CACHE_ENTRY_ID>" })
+        );
+    }
+
+    #[test]
+    fn request_id_header_placeholder_does_not_depend_on_value() {
+        // Any string under the x-ms-request-id key collapses — so two
+        // distinct UUIDs normalize to the same golden.
+        let v1 = json!({ "headers": { "x-ms-request-id": "uuid-1" } });
+        let v2 = json!({ "headers": { "x-ms-request-id": "uuid-2" } });
+        let n1 = normalize(v1, "http://b", &with(0, "abc"));
+        let n2 = normalize(v2, "http://b", &with(0, "abc"));
+        assert_eq!(n1, n2);
+        assert_eq!(
+            n1,
+            json!({ "headers": { "x-ms-request-id": "<REQUEST_ID>" } })
+        );
+    }
+
+    #[test]
+    fn nested_arrays_and_objects_are_walked() {
+        let v = json!({
+            "outer": [
+                { "inner_upload_url": "http://b/devstoreaccount1/upload/7" },
+                { "id": 7 },
+            ]
+        });
+        let out = normalize(v, "http://b", &with(7, "abc"));
+        assert_eq!(
+            out,
+            json!({
+                "outer": [
+                    { "inner_upload_url": "<BASE_URL>/devstoreaccount1/upload/<UPLOAD_ID>" },
+                    { "id": "<UPLOAD_ID>" },
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn comparator_catches_value_mutation() {
+        let exp = json!({ "status": 200, "ok": true });
+        let act = json!({ "status": 500, "ok": true });
+        let err = std::panic::catch_unwind(|| compare_to_golden_value(&exp, &act, "mutated"))
+            .unwrap_err();
+        let msg: String = err
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&'static str>().map(|s| (*s).to_string()))
+            .expect("panic payload");
+        assert!(
+            msg.contains("500") && msg.contains("200"),
+            "diff should surface both values, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn comparator_catches_type_swap() {
+        let exp = json!({ "entry_id": "42" }); // upstream stringifies
+        let act = json!({ "entry_id": 42 }); //     ours regresses to numeric
+        let r = std::panic::catch_unwind(|| compare_to_golden_value(&exp, &act, "type-swap"));
+        assert!(r.is_err(), "type swap should panic");
+    }
 }
