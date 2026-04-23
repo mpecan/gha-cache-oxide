@@ -7,13 +7,32 @@
 //! auth middleware and returns a body shaped to mirror upstream
 //! `routes/twirp/.../CacheService/*.post.ts` exactly.
 //!
-//! Error bodies use the h3 `createError` shape —
-//! `{ statusCode, message }` — so mixed upstream/port deployments see
-//! consistent payloads. Validation-class failures in
-//! `FinalizeCacheEntryUpload` return 400 (not upstream's implicit 500
-//! via `throw new Error`); the issue calls this out as a deliberate
-//! refinement because the upload row has already been purged by that
-//! point, so 400 "client must re-reserve" is the truthful semantic.
+//! # Error body shape
+//!
+//! Upstream's h3 `createError` produces two distinct body shapes
+//! depending on which key the caller supplied:
+//! - body-validation failures (zod parse errors) carry `statusMessage`
+//!   (e.g. `CreateCacheEntry.post.ts:18-20`)
+//! - auth, scope and not-found failures carry `message` (e.g.
+//!   `CreateCacheEntry.post.ts:27`, `FinalizeCacheEntryUpload.ts:30-32`)
+//!
+//! The port mirrors that split: [`bad_request_body`] emits
+//! `{statusCode, statusMessage}` for body-parse failures, while every
+//! other error path uses [`error_response`] which emits
+//! `{statusCode, message}`.
+//!
+//! # Deviations from upstream
+//!
+//! - Validation-class failures in `FinalizeCacheEntryUpload`
+//!   (`NoPartsUploaded`, `PartsCountMismatch`, `DiskCountMismatch`)
+//!   return 400 instead of upstream's implicit 500 via `throw new
+//!   Error`. The upload row has already been purged at that point, so
+//!   400 "client must re-reserve" is the truthful semantic.
+//! - `GetCacheEntryDownloadURL` does NOT include upstream's
+//!   missing-storage purge-and-retry loop (`lib/storage.ts:486-525`).
+//!   The default download URL points at our own `/download/{id}`
+//!   endpoint which itself is out of scope until #9 lands; until then
+//!   there is nothing for that loop to detect or retry against.
 
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
@@ -94,9 +113,9 @@ async fn create_cache_entry(
     Extension(scope): Extension<CacheScope>,
     body: Result<Json<KeyVersionBody>, JsonRejection>,
 ) -> Response {
-    let Json(body) = match body {
+    let body = match parse_body(body) {
         Ok(b) => b,
-        Err(e) => return bad_request(&e.body_text()),
+        Err(resp) => return resp,
     };
     let Some(write_scope) = find_write_scope(&scope) else {
         return forbidden("No scope with write permission found");
@@ -145,9 +164,9 @@ async fn finalize_cache_entry_upload(
     Extension(scope): Extension<CacheScope>,
     body: Result<Json<KeyVersionBody>, JsonRejection>,
 ) -> Response {
-    let Json(body) = match body {
+    let body = match parse_body(body) {
         Ok(b) => b,
-        Err(e) => return bad_request(&e.body_text()),
+        Err(resp) => return resp,
     };
     let Some(write_scope) = find_write_scope(&scope) else {
         return forbidden("No scope with write permission found");
@@ -191,9 +210,9 @@ async fn get_cache_entry_download_url(
     Extension(scope): Extension<CacheScope>,
     body: Result<Json<DownloadBody>, JsonRejection>,
 ) -> Response {
-    let Json(body) = match body {
+    let body = match parse_body(body) {
         Ok(b) => b,
-        Err(e) => return bad_request(&e.body_text()),
+        Err(resp) => return resp,
     };
 
     let scopes_sorted = scopes_by_permission_desc(&scope.scopes);
@@ -254,6 +273,38 @@ fn trim_slash(url: &str) -> &str {
     url.trim_end_matches('/')
 }
 
+/// Extracts the body from a `Result<Json<T>, JsonRejection>` extractor,
+/// converting any rejection to the upstream-compatible 400 body shape
+/// `{statusCode, statusMessage}`. Returned as `Err(Response)` so handlers
+/// can `?`-chain or `match` on it.
+///
+/// `axum::http::Response` is ~128 bytes, which trips `result_large_err`;
+/// the helper is called once per handler so the size is irrelevant — the
+/// alternative (`Box<Response>`) trades an allocation for nothing.
+#[allow(clippy::result_large_err)]
+fn parse_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Response> {
+    match body {
+        Ok(Json(b)) => Ok(b),
+        Err(rej) => Err(bad_request_body(&format!(
+            "Invalid body: {}",
+            rej.body_text()
+        ))),
+    }
+}
+
+/// 400 with the upstream `statusMessage` key — used for body-validation
+/// failures, mirroring `CreateCacheEntry.post.ts:18-20` and the other two
+/// handlers' zod-rejection paths.
+fn bad_request_body(message: &str) -> Response {
+    let body = Json(json!({
+        "statusCode": StatusCode::BAD_REQUEST.as_u16(),
+        "statusMessage": message,
+    }));
+    (StatusCode::BAD_REQUEST, body).into_response()
+}
+
+/// `{statusCode, message}` body — used for everything else (auth, scope,
+/// not-found, internal). Mirrors upstream `createError({ message: ... })`.
 fn error_response(status: StatusCode, message: &str) -> Response {
     let body = Json(json!({
         "statusCode": status.as_u16(),

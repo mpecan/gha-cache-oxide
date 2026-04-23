@@ -16,14 +16,12 @@ mod twirp_common;
 use axum::http::StatusCode;
 use gha_cache_oxide::db::entities::{CacheEntryCoord, NewUpload};
 use gha_cache_oxide::db::id::new_upload_id;
-use gha_cache_oxide::db::queries::{insert_storage_location_tx, upsert_cache_entry_tx};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tower::ServiceExt;
 
 use twirp_common::{
-    BASE_PATH, Harness, body_json, count, fetch_string, harness, mint_token, post, read_only_token,
-    write_token,
+    BASE_PATH, Harness, body_json, count, harness, post, read_only_token, write_token,
 };
 
 // --- 401 / route-not-found ----------------------------------------------
@@ -137,7 +135,7 @@ async fn create_cache_entry_with_read_only_scopes_is_403() {
 }
 
 #[tokio::test]
-async fn create_cache_entry_with_bad_body_is_400() {
+async fn create_cache_entry_with_bad_body_is_400_with_status_message() {
     let h = harness().await;
     let token = write_token();
     let req = post(
@@ -149,6 +147,12 @@ async fn create_cache_entry_with_bad_body_is_400() {
     let (status, body) = body_json(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["statusCode"], 400);
+    // Body-parse errors use `statusMessage` per upstream (see route
+    // docstring). Confirm the key is populated and non-empty.
+    let msg = body["statusMessage"]
+        .as_str()
+        .expect("statusMessage should be set for body-parse errors");
+    assert!(msg.starts_with("Invalid body:"), "got: {msg}");
 }
 
 // --- FinalizeCacheEntryUpload ------------------------------------------
@@ -234,6 +238,15 @@ async fn finalize_started_finished_mismatch_is_400_and_deletes_upload() {
     let (status, body) = body_json(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["statusCode"], 400);
+    // Validation-class finalize errors use `message` (not
+    // `statusMessage`) per the route docstring's split.
+    let msg = body["message"]
+        .as_str()
+        .expect("message should be set for validation-class errors");
+    assert!(
+        msg.contains("only") && msg.contains("of") && msg.contains("parts"),
+        "expected PartsCountMismatch wording, got: {msg}"
+    );
 
     assert_eq!(
         count(&h.db, "SELECT COUNT(*) FROM uploads").await,
@@ -258,7 +271,38 @@ async fn finalize_disk_count_mismatch_is_400_and_deletes_upload() {
     let (status, body) = body_json(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["statusCode"], 400);
+    let msg = body["message"].as_str().expect("message should be set");
+    assert!(
+        msg.contains("disk count") || msg.contains("does not match"),
+        "expected DiskCountMismatch wording, got: {msg}"
+    );
 
+    assert_eq!(count(&h.db, "SELECT COUNT(*) FROM uploads").await, 0);
+}
+
+#[tokio::test]
+async fn finalize_no_parts_uploaded_is_400_and_deletes_upload() {
+    // Closes the HTTP-level gap identified in review: cache_tests.rs
+    // already covers the CompleteUploadError::NoPartsUploaded branch at
+    // the service layer; this pins its HTTP mapping.
+    let h = harness().await;
+    let token = write_token();
+    let _ = seed_finalize_upload(&h, 0, 0, 0).await;
+
+    let req = post(
+        &format!("{BASE_PATH}/FinalizeCacheEntryUpload"),
+        Some(&token),
+        &json!({"key":"build-cache","version":"v1"}),
+    );
+    let resp = h.router.oneshot(req).await.unwrap();
+    let (status, body) = body_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["statusCode"], 400);
+    let msg = body["message"].as_str().expect("message should be set");
+    assert!(
+        msg.contains("no parts"),
+        "expected NoPartsUploaded wording, got: {msg}"
+    );
     assert_eq!(count(&h.db, "SELECT COUNT(*) FROM uploads").await, 0);
 }
 
@@ -275,6 +319,7 @@ async fn finalize_without_seeded_upload_is_404() {
     let (status, body) = body_json(resp).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["statusCode"], 404);
+    assert_eq!(body["message"], json!("Upload not found"));
 }
 
 #[tokio::test]
@@ -290,141 +335,5 @@ async fn finalize_read_only_scopes_is_403() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-// --- GetCacheEntryDownloadURL ------------------------------------------
-
-async fn seed_cache_entry(h: &Harness, key: &str, scope: &str, updated_at: i64) -> String {
-    use gha_cache_oxide::db::id::new_uuid;
-    let location_id = new_uuid();
-    let mut tx = h.db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, &location_id, &format!("folder-{location_id}"), 1)
-        .await
-        .unwrap();
-    let coord = CacheEntryCoord {
-        key,
-        version: "v1",
-        scope,
-        repo_id: "42",
-    };
-    let _ = upsert_cache_entry_tx(&mut tx, coord, &location_id, updated_at)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    fetch_string(
-        &h.db,
-        &format!(
-            "SELECT id FROM cache_entries WHERE key = '{key}' AND scope = '{scope}' \
-             AND version = 'v1' AND repoId = '42'"
-        ),
-    )
-    .await
-}
-
-#[tokio::test]
-async fn get_download_url_hit_returns_url_and_matched_key() {
-    let h = harness().await;
-    let token = write_token();
-    let entry_id = seed_cache_entry(&h, "build-cache", "refs/heads/main", 1_000).await;
-
-    let req = post(
-        &format!("{BASE_PATH}/GetCacheEntryDownloadURL"),
-        Some(&token),
-        &json!({"key":"build-cache","version":"v1"}),
-    );
-    let resp = h.router.oneshot(req).await.unwrap();
-    let (status, body) = body_json(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["ok"], json!(true));
-    assert_eq!(body["matched_key"], json!("build-cache"));
-    assert_eq!(
-        body["signed_download_url"],
-        json!(format!("http://localhost:3000/download/{entry_id}"))
-    );
-}
-
-#[tokio::test]
-async fn get_download_url_miss_returns_ok_false() {
-    let h = harness().await;
-    let token = write_token();
-    let req = post(
-        &format!("{BASE_PATH}/GetCacheEntryDownloadURL"),
-        Some(&token),
-        &json!({"key":"absent","version":"v1"}),
-    );
-    let resp = h.router.oneshot(req).await.unwrap();
-    let (status, body) = body_json(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({"ok": false}));
-}
-
-#[tokio::test]
-async fn get_download_url_prefers_higher_permission_scope() {
-    let h = harness().await;
-    // Two scopes seeded with the SAME primary key so the higher-permission
-    // scope wins after the per-permission-DESC sort that this handler
-    // applies (mirrors upstream sortBy([prop('Permission'),'desc'])).
-    let high_id = seed_cache_entry(&h, "shared", "scope-write", 1_000).await;
-    let _low_id = seed_cache_entry(&h, "shared", "scope-read", 9_999).await;
-
-    // Note ordering in the token is read-then-write so we PROVE the
-    // sort runs (raw order would pick scope-read first).
-    let token = mint_token(
-        &json!([
-            {"Scope": "scope-read",  "Permission": 0},
-            {"Scope": "scope-write", "Permission": 3},
-        ]),
-        "42",
-    );
-    let req = post(
-        &format!("{BASE_PATH}/GetCacheEntryDownloadURL"),
-        Some(&token),
-        &json!({"key":"shared","version":"v1"}),
-    );
-    let resp = h.router.oneshot(req).await.unwrap();
-    let (status, body) = body_json(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        body["signed_download_url"]
-            .as_str()
-            .unwrap()
-            .ends_with(&high_id),
-        "expected URL pointing at high-permission scope's entry id"
-    );
-}
-
-#[tokio::test]
-async fn get_download_url_bad_body_is_400() {
-    let h = harness().await;
-    let token = write_token();
-    let req = post(
-        &format!("{BASE_PATH}/GetCacheEntryDownloadURL"),
-        Some(&token),
-        &json!({"key":"k"}), // missing version
-    );
-    let resp = h.router.oneshot(req).await.unwrap();
-    let (status, body) = body_json(resp).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["statusCode"], 400);
-}
-
-#[tokio::test]
-async fn get_download_url_with_restore_keys_walks_them() {
-    let h = harness().await;
-    let token = write_token();
-    // Primary won't match; the restore key prefix should hit.
-    let _ = seed_cache_entry(&h, "deps-lockfile-abc", "refs/heads/main", 1_000).await;
-
-    let req = post(
-        &format!("{BASE_PATH}/GetCacheEntryDownloadURL"),
-        Some(&token),
-        &json!({
-            "key":"deps-primary-miss",
-            "version":"v1",
-            "restore_keys": ["deps-lockfile-"],
-        }),
-    );
-    let resp = h.router.oneshot(req).await.unwrap();
-    let (status, body) = body_json(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["ok"], json!(true));
-    assert_eq!(body["matched_key"], json!("deps-lockfile-abc"));
-}
+// GetCacheEntryDownloadURL integration tests live in tests/twirp_download.rs
+// to keep both files under the 500-line soft limit.

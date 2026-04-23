@@ -22,7 +22,7 @@ use crate::storage::{StorageAdapter, StorageError};
 /// infrastructure failures and leave the DB in whatever state the tx /
 /// query produced.
 #[derive(Debug, thiserror::Error)]
-pub enum CompleteUploadError {
+pub(crate) enum CompleteUploadError {
     #[error("upload not found for the given coordinates")]
     UploadNotFound,
 
@@ -43,7 +43,7 @@ pub enum CompleteUploadError {
 }
 
 /// Inputs to [`complete_upload`]. Bundled to keep the function at 3 args.
-pub struct CompleteUploadParams<'a> {
+pub(crate) struct CompleteUploadParams<'a> {
     pub coord: CacheEntryCoord<'a>,
     pub now_ms: i64,
 }
@@ -70,7 +70,7 @@ pub struct CompleteUploadParams<'a> {
 /// # Errors
 /// Returns [`CompleteUploadError`]. See the variant docs for which
 /// branch each represents.
-pub async fn complete_upload(
+pub(crate) async fn complete_upload(
     db: &Db,
     adapter: &dyn StorageAdapter,
     params: CompleteUploadParams<'_>,
