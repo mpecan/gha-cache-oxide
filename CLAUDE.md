@@ -43,6 +43,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+### Database
+
+Schema migrations are at `migrations/sqlite/*.sql` and run automatically on server startup via `sqlx::migrate!`. Queries use runtime-checked `sqlx::query_as` — no offline-mode `.sqlx/` cache to keep in sync. Query correctness is enforced by the unit tests in `src/db/queries.rs` (each exercises its query against an in-memory SQLite). When adding a new query, add a test that runs it.
+
 ## Code Standards
 
 ### Enforced limits (`clippy.toml`)
