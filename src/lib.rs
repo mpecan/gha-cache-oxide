@@ -30,9 +30,14 @@ use crate::state::AppState;
 /// with method/uri; the layer's default response hook logs status and latency.
 pub fn build_app(state: AppState) -> Router {
     let twirp = routes::twirp::router(state.clone());
+    // Blob routes (upload PUT / download GET) deliberately skip the
+    // OIDC middleware: the `upload_id` / `cache_entry_id` in the URL is
+    // the capability, matching upstream's routing topology.
+    let blob = routes::blob::router();
     Router::new()
         .route("/health", get(routes::health::handler))
         .nest("/twirp/github.actions.results.api.v1.CacheService", twirp)
+        .merge(blob)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

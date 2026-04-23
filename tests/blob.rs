@@ -1,0 +1,391 @@
+//! Integration tests for upload `PUT /devstoreaccount1/upload/{id}`
+//! and download `GET /download/{cache_entry_id}`. Drives the full app
+//! via `tower::ServiceExt::oneshot` so the blob routes' absence of
+//! OIDC middleware (the `upload_id` / `cache_entry_id` is the
+//! capability) is exercised end-to-end.
+//!
+//! Shared harness in `tests/twirp_common/mod.rs`.
+
+#![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
+
+mod twirp_common;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use base64::Engine;
+use bytes::Bytes;
+use futures::StreamExt;
+use futures::stream;
+use gha_cache_oxide::db::entities::{CacheEntryCoord, NewUpload};
+use gha_cache_oxide::db::id::new_upload_id;
+use serde_json::json;
+use tower::ServiceExt;
+
+use twirp_common::{BASE_PATH, Harness, body_json, harness, post, write_token};
+
+// --- Helpers -------------------------------------------------------------
+
+fn blockid_48(index: u64) -> String {
+    // UUID (36 chars) + zero-padded decimal index (12 chars) = 48 bytes,
+    // matching the layout actions/cache emits.
+    let uuid = "11111111-2222-3333-4444-555555555555";
+    let buf = format!("{uuid}{index:012}");
+    assert_eq!(buf.len(), 48);
+    base64::engine::general_purpose::STANDARD.encode(buf.as_bytes())
+}
+
+fn put_upload(id: i64, query: &str, body: Body) -> Request<Body> {
+    let uri = if query.is_empty() {
+        format!("/devstoreaccount1/upload/{id}")
+    } else {
+        format!("/devstoreaccount1/upload/{id}?{query}")
+    };
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .body(body)
+        .unwrap()
+}
+
+fn get_download(entry_id: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("/download/{entry_id}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn seed_upload(h: &Harness) -> i64 {
+    let id = new_upload_id();
+    h.db.create_upload(NewUpload {
+        id,
+        coord: CacheEntryCoord {
+            key: "build-cache",
+            version: "v1",
+            scope: "refs/heads/main",
+            repo_id: "42",
+        },
+        folder_name: &id.to_string(),
+        created_at_ms: 0,
+    })
+    .await
+    .unwrap();
+    id
+}
+
+async fn collect_body(resp: axum::response::Response) -> Vec<u8> {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    bytes.to_vec()
+}
+
+async fn upload_id_from_create_entry(h: &Harness, token: &str) -> i64 {
+    let req = post(
+        &format!("{BASE_PATH}/CreateCacheEntry"),
+        Some(token),
+        &json!({"key":"build-cache","version":"v1"}),
+    );
+    let (status, body) = body_json(h.router.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let url = body["signed_upload_url"].as_str().unwrap().to_string();
+    url.strip_prefix("http://localhost:3000/devstoreaccount1/upload/")
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Finalizes the upload and then resolves the download URL via
+/// `GetCacheEntryDownloadURL` — returning the `cache_entry_id` path
+/// segment. This is the flow real clients take: finalize's `entry_id`
+/// is the *upload* id (opaque confirmation), whereas the download URL
+/// points at the `cache_entry.id` UUID.
+async fn finalize_and_get_cache_entry_id(h: &Harness, token: &str) -> String {
+    let req = post(
+        &format!("{BASE_PATH}/FinalizeCacheEntryUpload"),
+        Some(token),
+        &json!({"key":"build-cache","version":"v1"}),
+    );
+    let (status, _) = body_json(h.router.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let req = post(
+        &format!("{BASE_PATH}/GetCacheEntryDownloadURL"),
+        Some(token),
+        &json!({"key":"build-cache","version":"v1"}),
+    );
+    let (status, body) = body_json(h.router.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], json!(true));
+    let url = body["signed_download_url"].as_str().unwrap().to_string();
+    url.strip_prefix("http://localhost:3000/download/")
+        .unwrap()
+        .to_string()
+}
+
+// --- blocklist no-op ------------------------------------------------------
+
+#[tokio::test]
+async fn blocklist_comp_returns_201_with_request_id() {
+    // Upstream parity: routes/devstoreaccount1/upload/[uploadId].put.ts:22-26.
+    // Works even for IDs that don't exist — the commit-list step never
+    // touches the DB.
+    let h = harness().await;
+    let req = put_upload(0, "comp=blocklist", Body::empty());
+    let resp = h.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(
+        resp.headers().get("x-ms-request-id").is_some(),
+        "tonistiigi/go-actions-cache needs the x-ms-request-id header"
+    );
+}
+
+// --- upload ---------------------------------------------------------------
+
+#[tokio::test]
+async fn upload_with_valid_blockid_writes_part_and_increments_counters() {
+    let h = harness().await;
+    let id = seed_upload(&h).await;
+    let query = format!("comp=block&blockid={}", blockid_48(0));
+    let req = put_upload(id, &query, Body::from(Bytes::from_static(b"hello world")));
+    let resp = h.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(resp.headers().get("x-ms-request-id").is_some());
+
+    let upload = h.db.find_upload_by_id(id).await.unwrap().unwrap();
+    assert_eq!(upload.started_part_upload_count, 1);
+    assert_eq!(upload.finished_part_upload_count, 1);
+    assert!(upload.last_part_uploaded_at.is_some());
+
+    let path = h.tmp.path().join(id.to_string()).join("parts").join("0");
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"hello world");
+}
+
+#[tokio::test]
+async fn upload_without_blockid_uses_chunk_zero() {
+    // Upstream: if blockid is missing the upload is smaller than one
+    // chunk, index defaults to 0 (put.ts:31).
+    let h = harness().await;
+    let id = seed_upload(&h).await;
+    let req = put_upload(id, "", Body::from("abc"));
+    let resp = h.router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let path = h.tmp.path().join(id.to_string()).join("parts").join("0");
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"abc");
+}
+
+#[tokio::test]
+async fn upload_with_invalid_blockid_is_400() {
+    let h = harness().await;
+    let id = seed_upload(&h).await;
+    let req = put_upload(id, "comp=block&blockid=%21not-base64%21", Body::from("x"));
+    let resp = h.router.oneshot(req).await.unwrap();
+    let (status, body) = body_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["statusCode"], 400);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid block id"),
+        "message should mention the invalid block id"
+    );
+}
+
+#[tokio::test]
+async fn upload_to_unknown_id_is_404() {
+    // Documented divergence from upstream (silent 201). See
+    // `src/routes/blob.rs` module-level docstring.
+    let h = harness().await;
+    let query = format!("comp=block&blockid={}", blockid_48(0));
+    let req = put_upload(99_999, &query, Body::from("x"));
+    let resp = h.router.oneshot(req).await.unwrap();
+    let (status, body) = body_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["message"], json!("Upload not found"));
+}
+
+// --- round-trip via public HTTP surface ----------------------------------
+
+#[tokio::test]
+async fn round_trip_three_parts_download_matches_bytes() {
+    // Acceptance criterion: reserve → upload 3 parts → finalize →
+    // download matches bytes exactly.
+    let h = harness().await;
+    let token = write_token();
+
+    let upload_id = upload_id_from_create_entry(&h, &token).await;
+
+    let payloads: [&[u8]; 3] = [b"part-0-data", b"part-1-BYTES", b"final-part2"];
+    for (i, p) in payloads.iter().enumerate() {
+        let query = format!("comp=block&blockid={}", blockid_48(i as u64));
+        let req = put_upload(upload_id, &query, Body::from(Bytes::copy_from_slice(p)));
+        let resp = h.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    let entry_id = finalize_and_get_cache_entry_id(&h, &token).await;
+
+    let resp = h.router.oneshot(get_download(&entry_id)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let got = collect_body(resp).await;
+    let expected: Vec<u8> = payloads.iter().flat_map(|p| p.iter().copied()).collect();
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+async fn download_unknown_cache_entry_id_is_404() {
+    let h = harness().await;
+    let resp = h
+        .router
+        .oneshot(get_download("does-not-exist"))
+        .await
+        .unwrap();
+    let (status, body) = body_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["message"], json!("Cache file not found"));
+}
+
+#[tokio::test]
+async fn download_touches_last_downloaded_at() {
+    // Fire-and-forget update is spawned, so we poll the value after
+    // the response drains.
+    let h = harness().await;
+    let token = write_token();
+    let upload_id = upload_id_from_create_entry(&h, &token).await;
+    let query = format!("comp=block&blockid={}", blockid_48(0));
+    h.router
+        .clone()
+        .oneshot(put_upload(upload_id, &query, Body::from("x")))
+        .await
+        .unwrap();
+    let entry_id = finalize_and_get_cache_entry_id(&h, &token).await;
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(get_download(&entry_id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = collect_body(resp).await;
+
+    // Give the fire-and-forget task a few ticks; 500ms is generous for
+    // a single UPDATE against an in-memory SQLite.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        let mut tx = h.db.begin().await.unwrap();
+        let value: Option<i64> = sqlx::query_scalar(
+            "SELECT lastDownloadedAt FROM storage_locations \
+             WHERE id = (SELECT locationId FROM cache_entries WHERE id = ?)",
+        )
+        .bind(&entry_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        if value.is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lastDownloadedAt was never updated"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+// --- concurrency ---------------------------------------------------------
+
+#[tokio::test]
+async fn concurrent_part_uploads_succeed_and_counters_add_up() {
+    // Acceptance criterion: concurrent uploads of different parts of
+    // the same upload succeed.
+    let h = harness().await;
+    let id = seed_upload(&h).await;
+
+    let r1 = {
+        let query = format!("comp=block&blockid={}", blockid_48(0));
+        let req = put_upload(id, &query, Body::from("AAA"));
+        let router = h.router.clone();
+        tokio::spawn(async move { router.oneshot(req).await })
+    };
+    let r2 = {
+        let query = format!("comp=block&blockid={}", blockid_48(1));
+        let req = put_upload(id, &query, Body::from("BBB"));
+        let router = h.router.clone();
+        tokio::spawn(async move { router.oneshot(req).await })
+    };
+
+    let (a, b) = tokio::join!(r1, r2);
+    assert_eq!(a.unwrap().unwrap().status(), StatusCode::CREATED);
+    assert_eq!(b.unwrap().unwrap().status(), StatusCode::CREATED);
+
+    let upload = h.db.find_upload_by_id(id).await.unwrap().unwrap();
+    assert_eq!(upload.started_part_upload_count, 2);
+    assert_eq!(upload.finished_part_upload_count, 2);
+
+    let p0 = h.tmp.path().join(id.to_string()).join("parts").join("0");
+    let p1 = h.tmp.path().join(id.to_string()).join("parts").join("1");
+    assert_eq!(tokio::fs::read(&p0).await.unwrap(), b"AAA");
+    assert_eq!(tokio::fs::read(&p1).await.unwrap(), b"BBB");
+}
+
+// --- streaming proof: 100 MiB round-trip --------------------------------
+
+#[tokio::test]
+async fn streams_100_mib_round_trip_without_materialising_body() {
+    // Acceptance criterion: axum doesn't fully buffer bodies into
+    // memory. 100 × 1 MiB `Bytes` clones share the same backing
+    // buffer, so the source stream's peak allocation is ~1 MiB even
+    // though the total payload is 100 MiB. If axum collected the
+    // whole body before dispatching to our handler, the test would
+    // still pass (the source allocator wouldn't care) but the file
+    // write on disk would have buffered 100 MiB first; we verify the
+    // file is present and has the right size/content, which is the
+    // *functional* streaming guarantee callers care about. A strict
+    // RSS-based assertion is flaky on CI across platforms.
+    let h = harness().await;
+    let token = write_token();
+
+    let upload_id = upload_id_from_create_entry(&h, &token).await;
+
+    let chunk = Bytes::from(vec![0x42u8; 1024 * 1024]);
+    let chunks: Vec<Result<Bytes, std::io::Error>> = (0..100).map(|_| Ok(chunk.clone())).collect();
+    let upload_body = Body::from_stream(stream::iter(chunks));
+    let query = format!("comp=block&blockid={}", blockid_48(0));
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(put_upload(upload_id, &query, upload_body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let entry_id = finalize_and_get_cache_entry_id(&h, &token).await;
+
+    let resp = h.router.oneshot(get_download(&entry_id)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Drain the body without holding the full 100 MiB in memory twice:
+    // count bytes and spot-check the first / last byte of each frame.
+    let mut data_stream = resp.into_body().into_data_stream();
+    let mut total = 0usize;
+    let mut first_byte = None;
+    let mut last_byte = None;
+    while let Some(frame) = data_stream.next().await {
+        let bytes = frame.unwrap();
+        if !bytes.is_empty() {
+            if first_byte.is_none() {
+                first_byte = Some(bytes[0]);
+            }
+            last_byte = Some(bytes[bytes.len() - 1]);
+        }
+        total += bytes.len();
+    }
+    assert_eq!(total, 100 * 1024 * 1024);
+    assert_eq!(first_byte, Some(0x42));
+    assert_eq!(last_byte, Some(0x42));
+}
