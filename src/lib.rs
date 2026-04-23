@@ -5,6 +5,7 @@
 //! the router directly without spawning the full process.
 
 pub mod auth;
+pub mod cache;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -28,8 +29,10 @@ use crate::state::AppState;
 /// Wires the tower-http `TraceLayer` at the top so every request emits a span
 /// with method/uri; the layer's default response hook logs status and latency.
 pub fn build_app(state: AppState) -> Router {
+    let twirp = routes::twirp::router(state.clone());
     Router::new()
         .route("/health", get(routes::health::handler))
+        .nest("/twirp/github.actions.results.api.v1.CacheService", twirp)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

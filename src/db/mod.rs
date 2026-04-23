@@ -82,6 +82,17 @@ impl Db {
         Ok(())
     }
 
+    /// Begins a transaction on the underlying pool. Used by service-
+    /// layer operations that need to compose several queries atomically
+    /// (for example, `cache::complete_upload`).
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` if the pool cannot issue a new transaction
+    /// (exhausted connections, closed pool, etc.).
+    pub async fn begin(&self) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, sqlx::Error> {
+        self.pool.begin().await
+    }
+
     /// Access to the underlying pool, for query helpers and test harnesses.
     /// Gated on `#[cfg(test)]` because only tests reach for the raw pool;
     /// production code goes through typed query methods.
