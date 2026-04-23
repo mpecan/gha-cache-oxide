@@ -372,13 +372,7 @@ async fn find_upload_by_coord_discriminates_each_column() {
                 ..base
             },
         ),
-        (
-            "wrong scope",
-            CacheEntryCoord {
-                scope: "X",
-                ..base
-            },
-        ),
+        ("wrong scope", CacheEntryCoord { scope: "X", ..base }),
         (
             "wrong repo_id",
             CacheEntryCoord {

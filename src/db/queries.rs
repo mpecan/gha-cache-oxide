@@ -254,7 +254,6 @@ pub async fn upsert_cache_entry_tx(
     }
 }
 
-
 #[cfg(test)]
 #[path = "queries_tests.rs"]
 mod tests;
