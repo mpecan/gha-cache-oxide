@@ -248,6 +248,74 @@ async fn download_unknown_cache_entry_id_is_404() {
 }
 
 #[tokio::test]
+async fn download_with_parts_deleted_but_not_merged_is_404() {
+    // Stale cache safety: if `parts_deleted_at` is set but no merged
+    // blob has been committed (`merged_at` is NULL), we 404 instead of
+    // truncating mid-stream. Guards the defensive branch at
+    // `src/routes/blob.rs` (parts_deleted_at.is_some()).
+    let h = harness().await;
+    let token = write_token();
+    let upload_id = upload_id_from_create_entry(&h, &token).await;
+    let query = format!("comp=block&blockid={}", blockid_48(0));
+    h.router
+        .clone()
+        .oneshot(put_upload(upload_id, &query, Body::from("x")))
+        .await
+        .unwrap();
+    let entry_id = finalize_and_get_cache_entry_id(&h, &token).await;
+
+    // Flip parts_deleted_at on the corresponding storage_location.
+    let mut tx = h.db.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE storage_locations SET partsDeletedAt = ? \
+         WHERE id = (SELECT locationId FROM cache_entries WHERE id = ?)",
+    )
+    .bind(1_234_567_i64)
+    .bind(&entry_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let resp = h.router.oneshot(get_download(&entry_id)).await.unwrap();
+    let (status, body) = body_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["message"], json!("Cache file not found"));
+}
+
+#[tokio::test]
+async fn download_returns_404_when_part_file_missing_on_disk() {
+    // Even with a valid cache_entry row, if the part file was deleted
+    // post-finalize (e.g. disk corruption) the client must see 404 at
+    // the start rather than a truncated body. Covers the
+    // `ensure_parts_exist` actual<expected branch.
+    let h = harness().await;
+    let token = write_token();
+    let upload_id = upload_id_from_create_entry(&h, &token).await;
+    let query = format!("comp=block&blockid={}", blockid_48(0));
+    h.router
+        .clone()
+        .oneshot(put_upload(upload_id, &query, Body::from("abc")))
+        .await
+        .unwrap();
+    let entry_id = finalize_and_get_cache_entry_id(&h, &token).await;
+
+    // Delete the sole part file; cache_entry row stays intact.
+    let part_path = h
+        .tmp
+        .path()
+        .join(upload_id.to_string())
+        .join("parts")
+        .join("0");
+    tokio::fs::remove_file(&part_path).await.unwrap();
+
+    let resp = h.router.oneshot(get_download(&entry_id)).await.unwrap();
+    let (status, body) = body_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["message"], json!("Cache file not found"));
+}
+
+#[tokio::test]
 async fn download_touches_last_downloaded_at() {
     // Fire-and-forget update is spawned, so we poll the value after
     // the response drains.

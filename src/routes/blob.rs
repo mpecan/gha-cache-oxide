@@ -25,6 +25,15 @@
 //!   `parts_deleted_at` columns are still observed: if a future change
 //!   introduces merging we serve the merged blob, and if parts have
 //!   been deleted post-merge we 404 rather than truncating mid-stream.
+//! - Download responses set `Content-Type: application/octet-stream`
+//!   explicitly; upstream leaves the header to whatever h3's
+//!   `sendStream` emits by default. Being explicit matches what the
+//!   GitHub client expects.
+//! - Error response bodies follow the `{statusCode, message}` shape
+//!   already used by `routes::twirp`'s `error_response`. Upstream's h3
+//!   `createError` emits a richer `{statusCode, statusMessage,
+//!   message, ...}` shape — but `actions/cache` only consumes the
+//!   status code, so the smaller body is benign.
 
 use std::io;
 use std::sync::Arc;
@@ -51,7 +60,7 @@ use crate::storage::{ByteStream, StorageAdapter, StorageError};
 /// the routes live at the app root (`/devstoreaccount1/...`,
 /// `/download/...`) — that's what `CreateCacheEntry` and
 /// `GetCacheEntryDownloadURL` advertise in their `signed_*_url` fields.
-pub fn router() -> Router<AppState> {
+pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/devstoreaccount1/upload/{upload_id}", put(upload_part))
         .route("/download/{cache_entry_id}", get(download))
@@ -160,20 +169,28 @@ async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<Stri
         return not_found("Cache file not found");
     }
 
+    // `partCount` is declared `INTEGER NOT NULL` in the schema and
+    // written via `insert_storage_location_tx` from a `u64` count — so a
+    // negative value would be a schema invariant violation. Surface it
+    // as a 500 rather than silently coercing to zero (which would
+    // truncate the download to an empty body).
+    let Ok(expected_parts) = u64::try_from(location.part_count) else {
+        return internal_error(&format!(
+            "negative partCount ({}) on storage_location {}",
+            location.part_count, location.id
+        ));
+    };
+
     if let Err(resp) = ensure_parts_exist(
         state.storage.as_ref(),
         &location.folder_name,
-        location.part_count,
+        expected_parts,
     )
     .await
     {
         return resp;
     }
-    stream_parts_response(
-        state.storage.clone(),
-        location.folder_name,
-        location.part_count,
-    )
+    stream_parts_response(state.storage.clone(), location.folder_name, expected_parts)
 }
 
 /// Best-effort `UPDATE storage_locations SET lastDownloadedAt = ?`.
@@ -198,15 +215,14 @@ fn spawn_touch_last_downloaded(state: &AppState, location_id: &str) {
 async fn ensure_parts_exist(
     adapter: &dyn StorageAdapter,
     folder_name: &str,
-    expected_part_count: i64,
+    expected_part_count: u64,
 ) -> Result<(), Response> {
     let parts_folder = format!("{folder_name}/parts");
     let actual = adapter
         .count_files_in_folder(&parts_folder)
         .await
         .map_err(|e| internal_error(&e.to_string()))?;
-    let expected = u64::try_from(expected_part_count).unwrap_or(0);
-    if actual < expected {
+    if actual < expected_part_count {
         Err(not_found("Cache file not found"))
     } else {
         Ok(())
@@ -220,9 +236,9 @@ async fn ensure_parts_exist(
 fn stream_parts_response(
     storage: Arc<dyn StorageAdapter>,
     folder_name: String,
-    part_count: i64,
+    part_count: u64,
 ) -> Response {
-    let indices = 0..u64::try_from(part_count).unwrap_or(0);
+    let indices = 0..part_count;
     let stream = futures::stream::iter(indices)
         .then(move |i| {
             let storage = storage.clone();
