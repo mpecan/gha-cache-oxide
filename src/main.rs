@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
+use gha_cache_oxide::auth::{HttpJwksFetcher, JwksCache};
 use gha_cache_oxide::config::{AppConfig, DbConfig, StorageConfig};
 use gha_cache_oxide::db::Db;
 use gha_cache_oxide::state::AppState;
@@ -27,8 +28,12 @@ async fn main() -> anyhow::Result<()> {
     let storage = connect_storage(&config.storage)?;
     tracing::info!("storage ready");
 
+    // JWKS cache is lazy: first incoming request triggers the initial
+    // fetch. Doing it here avoids blocking startup on an external host.
+    let jwks = Arc::new(JwksCache::new(Arc::new(HttpJwksFetcher::github_default())));
+
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    let state = AppState::new(db, storage, config);
+    let state = AppState::new(db, storage, jwks, config);
     let app = gha_cache_oxide::build_app(state);
     let listener = TcpListener::bind(addr)
         .await
