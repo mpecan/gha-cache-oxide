@@ -57,9 +57,13 @@ Draft the issue body using this template. Fill every section; delete sections on
 
 **Title:** conventional-commit style — `<type>(<scope>): <imperative short description>` (e.g. `feat(api): implement reserve cache endpoint`). Scope comes from the CLAUDE.md list (`api`, `storage`, `db`, `config`, `cli`, `server`) or omit if cross-cutting.
 
-**Dependencies:** if this issue needs another issue to land first, add a line:
-`Depends on #<number>`
-near the top. `/implement-issue` reads these.
+**Dependencies:** if this issue needs another issue to land first, add a `## Dependencies` section at the bottom of the body:
+```markdown
+## Dependencies
+Depends on #<number>
+Depends on #<other>
+```
+`/implement-issue` (via `.claude/scripts/load-issue-context.sh`) greps for `Depends on #N` lines to build the stacking chain — one dependency per line.
 
 ## Phase 4: Confirm, then file
 

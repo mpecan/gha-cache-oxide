@@ -110,6 +110,7 @@ Examples:
 Custom slash commands live in `.claude/commands/`:
 
 - `/create-issue` — draft and file a GitHub issue against this repo with project-specific context.
+- `/implement-issue <number>` — plan → implement → review → PR cycle for a filed issue, with stacked-PR support when issues depend on each other. Driven by `.claude/scripts/load-issue-context.sh`, which resolves `Depends on #N` lines in issue bodies.
 
 ## Reference
 
