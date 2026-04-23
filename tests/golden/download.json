@@ -1,0 +1,9 @@
+{
+  "body": {
+    "body_len": 30
+  },
+  "headers": {
+    "content-type": "application/octet-stream"
+  },
+  "status": 200
+}

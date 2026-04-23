@@ -1,0 +1,11 @@
+{
+  "body": {
+    "matched_key": "e2e-key",
+    "ok": true,
+    "signed_download_url": "<BASE_URL>/download/<CACHE_ENTRY_ID>"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 200
+}
