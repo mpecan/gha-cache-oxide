@@ -2,11 +2,13 @@
 //! testable behaviour lives in `gha_cache_oxide::*`.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Context;
-use gha_cache_oxide::config::{AppConfig, DbConfig};
+use gha_cache_oxide::config::{AppConfig, DbConfig, StorageConfig};
 use gha_cache_oxide::db::Db;
 use gha_cache_oxide::state::AppState;
+use gha_cache_oxide::storage::{FilesystemAdapter, StorageAdapter};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -22,8 +24,11 @@ async fn main() -> anyhow::Result<()> {
     db.migrate().await.context("running database migrations")?;
     tracing::info!("database ready");
 
+    let storage = connect_storage(&config.storage)?;
+    tracing::info!("storage ready");
+
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    let state = AppState::new(db, config);
+    let state = AppState::new(db, storage, config);
     let app = gha_cache_oxide::build_app(state);
     let listener = TcpListener::bind(addr)
         .await
@@ -51,5 +56,27 @@ async fn connect_db(cfg: &DbConfig) -> anyhow::Result<Db> {
         DbConfig::Mysql { .. } => {
             anyhow::bail!("DB_DRIVER=mysql is not yet implemented; use DB_DRIVER=sqlite")
         }
+    }
+}
+
+/// Builds a storage adapter for the configured driver. Only filesystem is
+/// wired up in M1; S3 / GCS are defined in the config contract but not
+/// yet implemented — they surface an explicit startup error pointing at
+/// the issues that will land them.
+fn connect_storage(cfg: &StorageConfig) -> anyhow::Result<Arc<dyn StorageAdapter>> {
+    match cfg {
+        StorageConfig::Filesystem { path } => {
+            let adapter = FilesystemAdapter::new(path).with_context(|| {
+                format!("initialising filesystem storage at {}", path.display())
+            })?;
+            Ok(Arc::new(adapter))
+        }
+        StorageConfig::S3 { .. } => anyhow::bail!(
+            "STORAGE_DRIVER=s3 is not yet implemented in M1 (landing in #12); \
+             use STORAGE_DRIVER=filesystem for now"
+        ),
+        StorageConfig::Gcs { .. } => anyhow::bail!(
+            "STORAGE_DRIVER=gcs is not yet implemented; use STORAGE_DRIVER=filesystem"
+        ),
     }
 }
