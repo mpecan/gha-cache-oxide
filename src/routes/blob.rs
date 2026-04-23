@@ -47,10 +47,10 @@ use axum::routing::{get, put};
 use base64::Engine;
 use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::db::id::now_ms;
+use crate::routes::errors::{bad_request, internal_error, not_found};
 use crate::state::AppState;
 use crate::storage::{ByteStream, StorageAdapter, StorageError};
 
@@ -314,29 +314,6 @@ fn parse_chunk_index(b64: &str) -> Option<u64> {
         }
         _ => None,
     }
-}
-
-// --- JSON error helpers, mirroring routes::twirp `error_response` -------
-
-fn error_response(status: StatusCode, message: &str) -> Response {
-    let body = axum::Json(json!({
-        "statusCode": status.as_u16(),
-        "message": message,
-    }));
-    (status, body).into_response()
-}
-
-fn bad_request(msg: &str) -> Response {
-    error_response(StatusCode::BAD_REQUEST, msg)
-}
-
-fn not_found(msg: &str) -> Response {
-    error_response(StatusCode::NOT_FOUND, msg)
-}
-
-fn internal_error(msg: &str) -> Response {
-    tracing::error!(message = msg, "blob route internal error");
-    error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
 }
 
 #[cfg(test)]

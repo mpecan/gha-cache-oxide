@@ -48,6 +48,7 @@ use crate::auth::{CacheScope, ScopeEntry, require_github_token};
 use crate::cache::{CompleteUploadError, CompleteUploadParams, complete_upload};
 use crate::db::entities::{CacheEntryCoord, MatchRequest, NewUpload};
 use crate::db::id::{new_upload_id, now_ms};
+use crate::routes::errors::{bad_request, forbidden, internal_error, not_found};
 use crate::state::AppState;
 
 /// Builds the Twirp sub-router with the auth middleware applied.
@@ -294,40 +295,15 @@ fn parse_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Response> {
 
 /// 400 with the upstream `statusMessage` key — used for body-validation
 /// failures, mirroring `CreateCacheEntry.post.ts:18-20` and the other two
-/// handlers' zod-rejection paths.
+/// handlers' zod-rejection paths. Stays local to this module because
+/// no other route produces h3/zod-shaped bodies (everything else uses
+/// [`crate::routes::errors::bad_request`]).
 fn bad_request_body(message: &str) -> Response {
     let body = Json(json!({
         "statusCode": StatusCode::BAD_REQUEST.as_u16(),
         "statusMessage": message,
     }));
     (StatusCode::BAD_REQUEST, body).into_response()
-}
-
-/// `{statusCode, message}` body — used for everything else (auth, scope,
-/// not-found, internal). Mirrors upstream `createError({ message: ... })`.
-fn error_response(status: StatusCode, message: &str) -> Response {
-    let body = Json(json!({
-        "statusCode": status.as_u16(),
-        "message": message,
-    }));
-    (status, body).into_response()
-}
-
-fn bad_request(msg: &str) -> Response {
-    error_response(StatusCode::BAD_REQUEST, msg)
-}
-
-fn forbidden(msg: &str) -> Response {
-    error_response(StatusCode::FORBIDDEN, msg)
-}
-
-fn not_found(msg: &str) -> Response {
-    error_response(StatusCode::NOT_FOUND, msg)
-}
-
-fn internal_error(msg: &str) -> Response {
-    tracing::error!(message = msg, "cache-service route internal error");
-    error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
 }
 
 #[cfg(test)]
