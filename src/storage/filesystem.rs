@@ -163,6 +163,19 @@ fn translate_not_found(err: object_store::Error, name: &str) -> StorageError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
+    //! Filesystem-specific tests. Trait-level scenarios (round-trip,
+    //! traversal rejection, folder operations, signed-URL capability,
+    //! byte-exactness at size boundaries) live in
+    //! `tests/storage_conformance.rs` so every future driver inherits
+    //! them for free.
+    //!
+    //! What stays here:
+    //! - [`object_path_round_trips_for_normal_names`] — exercises the
+    //!   private `object_path()` helper, which has no trait equivalent.
+    //! - [`round_trip_arbitrary_bytes`] — proptest fuzz over random
+    //!   payload shapes and sizes (0–1 MiB, 16 cases). The conformance
+    //!   suite pins deterministic size boundaries (0, small, 12 MiB);
+    //!   the proptest adds random-shape coverage in between.
     use super::*;
 
     use bytes::Bytes;
@@ -188,255 +201,12 @@ mod tests {
         (adapter, tmp)
     }
 
-    #[tokio::test]
-    async fn round_trip_zero_bytes() {
-        let (adapter, _tmp) = temp_adapter();
-        adapter
-            .upload_stream("empty.bin", bytes_stream(vec![]))
-            .await
-            .unwrap();
-        let got = collect(adapter.download_stream("empty.bin").await.unwrap()).await;
-        assert!(got.is_empty());
-    }
-
-    #[tokio::test]
-    async fn round_trip_small_payload() {
-        let (adapter, _tmp) = temp_adapter();
-        let payload = b"hello, world".to_vec();
-        adapter
-            .upload_stream("folder/file.bin", bytes_stream(payload.clone()))
-            .await
-            .unwrap();
-        let got = collect(adapter.download_stream("folder/file.bin").await.unwrap()).await;
-        assert_eq!(got, payload);
-    }
-
-    #[tokio::test]
-    async fn download_missing_returns_object_not_found() {
-        let (adapter, _tmp) = temp_adapter();
-        let result = adapter.download_stream("does/not/exist").await;
-        match result {
-            Err(StorageError::ObjectNotFound(ref s)) if s == "does/not/exist" => {}
-            Err(other) => panic!("expected ObjectNotFound, got {other:?}"),
-            Ok(_) => panic!("expected Err, got Ok"),
-        }
-    }
-
-    #[tokio::test]
-    async fn upload_rejects_directory_traversal() {
-        let (adapter, _tmp) = temp_adapter();
-        let err = adapter
-            .upload_stream("../etc/passwd", bytes_stream(b"bad".to_vec()))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, StorageError::InvalidObjectName { .. }),
-            "expected InvalidObjectName, got {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn download_rejects_traversal() {
-        let (adapter, _tmp) = temp_adapter();
-        match adapter.download_stream("/etc/passwd").await {
-            Err(StorageError::InvalidObjectName { .. }) => {}
-            Err(other) => panic!("expected InvalidObjectName, got {other:?}"),
-            Ok(_) => panic!("expected Err, got Ok"),
-        }
-    }
-
-    #[tokio::test]
-    async fn count_files_in_missing_folder_returns_zero() {
-        let (adapter, _tmp) = temp_adapter();
-        assert_eq!(
-            adapter.count_files_in_folder("no-such-dir").await.unwrap(),
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn count_files_counts_uploaded_files() {
-        let (adapter, _tmp) = temp_adapter();
-        for i in 0u8..3 {
-            adapter
-                .upload_stream(&format!("parts/{i}"), bytes_stream(vec![i]))
-                .await
-                .unwrap();
-        }
-        // Unrelated folder shouldn't be counted.
-        adapter
-            .upload_stream("other/z", bytes_stream(vec![0]))
-            .await
-            .unwrap();
-
-        assert_eq!(adapter.count_files_in_folder("parts").await.unwrap(), 3);
-        assert_eq!(adapter.count_files_in_folder("other").await.unwrap(), 1);
-    }
-
-    #[tokio::test]
-    async fn delete_folder_removes_all_children() {
-        let (adapter, _tmp) = temp_adapter();
-        for i in 0u8..3 {
-            adapter
-                .upload_stream(&format!("target/{i}"), bytes_stream(vec![i]))
-                .await
-                .unwrap();
-        }
-        adapter
-            .upload_stream("sibling/x", bytes_stream(vec![0]))
-            .await
-            .unwrap();
-
-        adapter.delete_folder("target").await.unwrap();
-
-        assert_eq!(adapter.count_files_in_folder("target").await.unwrap(), 0);
-        // Sibling unaffected.
-        assert_eq!(adapter.count_files_in_folder("sibling").await.unwrap(), 1);
-    }
-
-    #[tokio::test]
-    async fn delete_missing_folder_is_noop() {
-        let (adapter, _tmp) = temp_adapter();
-        adapter.delete_folder("never-created").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn clear_removes_everything() {
-        let (adapter, _tmp) = temp_adapter();
-        adapter
-            .upload_stream("a/1", bytes_stream(vec![1]))
-            .await
-            .unwrap();
-        adapter
-            .upload_stream("b/2", bytes_stream(vec![2]))
-            .await
-            .unwrap();
-
-        adapter.clear().await.unwrap();
-
-        assert_eq!(adapter.count_files_in_folder("a").await.unwrap(), 0);
-        assert_eq!(adapter.count_files_in_folder("b").await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn signed_url_always_none_on_filesystem() {
-        let (adapter, _tmp) = temp_adapter();
-        assert!(adapter.signed_url("anything").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn signed_url_validates_object_name() {
-        let (adapter, _tmp) = temp_adapter();
-        match adapter.signed_url("../evil").await {
-            Err(StorageError::InvalidObjectName { .. }) => {}
-            Err(other) => panic!("expected InvalidObjectName, got {other:?}"),
-            Ok(_) => panic!("expected Err, got Ok(None)"),
-        }
-    }
-
-    #[tokio::test]
-    async fn prefix_matching_is_segment_aware() {
-        // Object_store's Path::prefix_match should treat "parts" and
-        // "parts-foo" as disjoint top-level segments. Pin this contract
-        // so a future backend switch can't silently leak sibling folders.
-        let (adapter, _tmp) = temp_adapter();
-        adapter
-            .upload_stream("parts/a", bytes_stream(vec![1]))
-            .await
-            .unwrap();
-        adapter
-            .upload_stream("parts/b", bytes_stream(vec![2]))
-            .await
-            .unwrap();
-        adapter
-            .upload_stream("parts-foo/x", bytes_stream(vec![3]))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            adapter.count_files_in_folder("parts").await.unwrap(),
-            2,
-            "count should match only the 'parts' folder, not 'parts-foo'"
-        );
-
-        // And delete_folder must not touch the sibling.
-        adapter.delete_folder("parts").await.unwrap();
-        assert_eq!(adapter.count_files_in_folder("parts").await.unwrap(), 0);
-        assert_eq!(
-            adapter.count_files_in_folder("parts-foo").await.unwrap(),
-            1,
-            "delete_folder(\"parts\") must not affect 'parts-foo'"
-        );
-    }
-
-    #[tokio::test]
-    async fn upload_overwrites_existing_object() {
-        let (adapter, _tmp) = temp_adapter();
-        adapter
-            .upload_stream("obj", bytes_stream(b"first".to_vec()))
-            .await
-            .unwrap();
-        adapter
-            .upload_stream("obj", bytes_stream(b"second".to_vec()))
-            .await
-            .unwrap();
-        let got = collect(adapter.download_stream("obj").await.unwrap()).await;
-        assert_eq!(&got, b"second");
-    }
-
-    #[tokio::test]
-    async fn delete_folder_is_recursive_across_nested_directories() {
-        let (adapter, _tmp) = temp_adapter();
-        adapter
-            .upload_stream("root/a", bytes_stream(vec![1]))
-            .await
-            .unwrap();
-        adapter
-            .upload_stream("root/nested/b", bytes_stream(vec![2]))
-            .await
-            .unwrap();
-        adapter
-            .upload_stream("root/nested/deep/c", bytes_stream(vec![3]))
-            .await
-            .unwrap();
-
-        adapter.delete_folder("root").await.unwrap();
-
-        assert_eq!(adapter.count_files_in_folder("root").await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn round_trip_large_payload_crosses_buffer_flush() {
-        // Exercises `BufWriter` across its flush boundary. 12 MiB beats
-        // the default 10 MiB threshold with margin; keeps test runtime
-        // in single-digit seconds.
-        let (adapter, _tmp) = temp_adapter();
-        // Non-uniform payload so we'd catch accidental chunk reordering.
-        let payload: Vec<u8> = (0..12 * 1024 * 1024)
-            .map(|i| u8::try_from(i % 251).unwrap())
-            .collect();
-        adapter
-            .upload_stream("big.bin", bytes_stream(payload.clone()))
-            .await
-            .unwrap();
-        let got = collect(adapter.download_stream("big.bin").await.unwrap()).await;
-        assert_eq!(got.len(), payload.len());
-        assert_eq!(got, payload);
-    }
-
     #[test]
     fn object_path_round_trips_for_normal_names() {
         assert!(FilesystemAdapter::object_path("folder/file").is_ok());
         assert!(FilesystemAdapter::object_path("/absolute").is_err());
         assert!(FilesystemAdapter::object_path("../traversal").is_err());
     }
-
-    // ------------------------------------------------------------------
-    // Property test — round-trip byte equality under arbitrary payloads.
-    // Proptest's default strategy would generate enormous payloads; cap at
-    // 1 MiB so the test runs in reasonable wall time but still exercises
-    // multi-chunk streaming through `BufWriter`.
-    // ------------------------------------------------------------------
 
     proptest! {
         #![proptest_config(ProptestConfig {
