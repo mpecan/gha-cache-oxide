@@ -13,7 +13,10 @@
 use sqlx::{Sqlite, Transaction};
 
 use super::Db;
-use super::entities::{CacheEntryCoord, NewUpload, PreviousLocation, StorageLocation, Upload};
+use super::entities::{
+    CacheEntry, CacheEntryCoord, MatchRequest, MatchType, MatchedEntry, NewUpload,
+    PreviousLocation, StorageLocation, Upload,
+};
 
 // -- Uploads --------------------------------------------------------------
 
@@ -254,6 +257,130 @@ pub async fn upsert_cache_entry_tx(
     }
 }
 
+// -- Cache entry matching -------------------------------------------------
+
+/// Escapes `%`, `_` and `\` for a SQL `LIKE ... ESCAPE '\'` pattern.
+///
+/// Mirrors upstream `escapeLikePattern` in `lib/storage.ts`. Order
+/// matters: the backslash must be doubled first, otherwise the escapes
+/// we add for `%` and `_` would themselves be doubled.
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('%', r"\%")
+        .replace('_', r"\_")
+}
+
+/// Scope of a single-query lookup inside `match_cache_entry`. Grouped so
+/// `find_exact_in_scope` / `find_prefix_in_scope` stay at three args.
+struct ScopeQuery<'a> {
+    version: &'a str,
+    scope: &'a str,
+    repo_id: &'a str,
+}
+
+impl Db {
+    /// Looks up a cache entry matching `req` — exact primary, then prefix
+    /// primary, then (per scope, if `restore_keys` is non-empty) each
+    /// restore key's exact and prefix variants. Returns the first hit
+    /// together with a `MatchType` indicating which branch produced it.
+    ///
+    /// Line-matches upstream `lib/storage.ts#matchCacheEntry` including
+    /// the per-scope short-circuit: if primary fails for the first scope
+    /// and `restore_keys` is empty, the function returns `None` without
+    /// trying further scopes.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on any query failure.
+    pub async fn match_cache_entry(
+        &self,
+        req: MatchRequest<'_>,
+    ) -> Result<Option<MatchedEntry>, sqlx::Error> {
+        for scope in req.scopes {
+            let q = ScopeQuery {
+                version: req.version,
+                scope,
+                repo_id: req.repo_id,
+            };
+
+            if let Some(entry) = self.find_exact_in_scope(req.primary_key, &q).await? {
+                return Ok(Some(tag(entry, MatchType::ExactPrimary)));
+            }
+            if let Some(entry) = self.find_prefix_in_scope(req.primary_key, &q).await? {
+                return Ok(Some(tag(entry, MatchType::PrefixedPrimary)));
+            }
+            if req.restore_keys.is_empty() {
+                return Ok(None);
+            }
+            if let Some(m) = self.walk_restore_keys(req.restore_keys, &q).await? {
+                return Ok(Some(m));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn walk_restore_keys(
+        &self,
+        restore_keys: &[&str],
+        q: &ScopeQuery<'_>,
+    ) -> Result<Option<MatchedEntry>, sqlx::Error> {
+        for rk in restore_keys {
+            if let Some(entry) = self.find_exact_in_scope(rk, q).await? {
+                return Ok(Some(tag(entry, MatchType::ExactRestore)));
+            }
+            if let Some(entry) = self.find_prefix_in_scope(rk, q).await? {
+                return Ok(Some(tag(entry, MatchType::PrefixedRestore)));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn find_exact_in_scope(
+        &self,
+        key: &str,
+        q: &ScopeQuery<'_>,
+    ) -> Result<Option<CacheEntry>, sqlx::Error> {
+        sqlx::query_as::<_, CacheEntry>(
+            "SELECT * FROM cache_entries \
+             WHERE key = ? AND version = ? AND scope = ? AND repoId = ? \
+             ORDER BY updatedAt DESC LIMIT 1",
+        )
+        .bind(key)
+        .bind(q.version)
+        .bind(q.scope)
+        .bind(q.repo_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    async fn find_prefix_in_scope(
+        &self,
+        key: &str,
+        q: &ScopeQuery<'_>,
+    ) -> Result<Option<CacheEntry>, sqlx::Error> {
+        let pattern = format!("{}%", escape_like_pattern(key));
+        sqlx::query_as::<_, CacheEntry>(
+            "SELECT * FROM cache_entries \
+             WHERE key LIKE ? ESCAPE '\\' AND version = ? AND scope = ? AND repoId = ? \
+             ORDER BY updatedAt DESC LIMIT 1",
+        )
+        .bind(pattern)
+        .bind(q.version)
+        .bind(q.scope)
+        .bind(q.repo_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+}
+
+const fn tag(entry: CacheEntry, match_type: MatchType) -> MatchedEntry {
+    MatchedEntry { entry, match_type }
+}
+
 #[cfg(test)]
 #[path = "queries_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "match_cache_entry_tests.rs"]
+mod match_tests;

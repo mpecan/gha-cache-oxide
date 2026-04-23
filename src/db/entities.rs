@@ -85,3 +85,43 @@ pub struct NewUpload<'a> {
     pub folder_name: &'a str,
     pub created_at_ms: i64,
 }
+
+/// Classifies how a `cache_entries` row was matched.
+///
+/// Mirrors upstream's four-valued `type` field in
+/// `lib/storage.ts#matchCacheEntry` so the caller can surface the same
+/// distinction back to `actions/cache`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchType {
+    /// `key = primaryKey` on the first scope to yield a hit.
+    ExactPrimary,
+    /// `key LIKE primaryKey%` on the first scope to yield a hit.
+    PrefixedPrimary,
+    /// `key = restoreKey[i]` for some `i`, after primary failed.
+    ExactRestore,
+    /// `key LIKE restoreKey[i]%` for some `i`, after primary and exact
+    /// restore failed.
+    PrefixedRestore,
+}
+
+/// A cache entry returned by [`Db::match_cache_entry`](super::Db::match_cache_entry),
+/// tagged with how it was matched.
+#[derive(Debug, Clone)]
+pub struct MatchedEntry {
+    pub entry: CacheEntry,
+    pub match_type: MatchType,
+}
+
+/// Inputs to [`Db::match_cache_entry`](super::Db::match_cache_entry).
+///
+/// `scopes` is in priority order — the first scope wins when multiple
+/// scopes could match. `restore_keys` is ordered from highest to lowest
+/// priority (upstream semantics).
+#[derive(Debug, Clone, Copy)]
+pub struct MatchRequest<'a> {
+    pub primary_key: &'a str,
+    pub restore_keys: &'a [&'a str],
+    pub version: &'a str,
+    pub scopes: &'a [&'a str],
+    pub repo_id: &'a str,
+}
