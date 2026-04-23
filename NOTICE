@@ -1,0 +1,13 @@
+gha-cache-oxide
+Copyright (c) 2026 Matjaz Domen Pecan
+
+This product is a Rust port of github-actions-cache-server
+(https://github.com/falcondev-oss/github-actions-cache-server),
+originally developed by falconDev IT GmbH and licensed under the
+MIT License.
+
+Upstream copyright:
+  Copyright (c) 2024 - falconDev IT GmbH
+
+See LICENSE for the full license text applicable to both the original
+work and this port.
