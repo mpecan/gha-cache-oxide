@@ -373,3 +373,37 @@ async fn exact_restore_beats_prefix_restore_on_same_scope() {
     assert_eq!(m.match_type, MatchType::ExactRestore);
     assert_eq!(m.entry.id, exact);
 }
+
+#[tokio::test]
+async fn empty_scopes_returns_none() {
+    // Outer loop never runs; falls through to Ok(None). Pin this so a
+    // future refactor can't accidentally introduce a default branch.
+    let db = test_db().await;
+    let _ = seed(&db, "k", 1_000).await;
+
+    let out = db.match_cache_entry(req("k", &["k"], &[])).await.unwrap();
+    assert!(out.is_none());
+}
+
+#[tokio::test]
+async fn cross_scope_restore_match_continues_when_first_scope_misses_entirely() {
+    // The interesting branch interaction: scope[0] yields no primary AND
+    // no restore-key hit, so `walk_restore_keys` returns None for that
+    // scope and the outer loop must continue into scope[1], where the
+    // restore key finally matches. Guards against a regression that
+    // would `return Ok(None)` after an unsuccessful walk.
+    let db = test_db().await;
+    let hit = seed_in_scope(&db, "deps", "scope-second", 1_000).await;
+
+    let m = db
+        .match_cache_entry(req(
+            "missing-primary",
+            &["deps"],
+            &["scope-first", "scope-second"],
+        ))
+        .await
+        .unwrap()
+        .expect("scope[1]'s restore-key match should be returned");
+    assert_eq!(m.match_type, MatchType::ExactRestore);
+    assert_eq!(m.entry.id, hit);
+}

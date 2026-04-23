@@ -290,6 +290,13 @@ impl Db {
     /// and `restore_keys` is empty, the function returns `None` without
     /// trying further scopes.
     ///
+    /// Micro-deviation: the exact lookup adds `ORDER BY updatedAt DESC
+    /// LIMIT 1` even though upstream's exact-primary query omits it.
+    /// `(key, version, scope, repoId)` is unique by construction
+    /// (`upsert_cache_entry_tx` updates rather than inserts on collision),
+    /// so the ordering is a no-op in practice and matches the shape
+    /// upstream uses for its exact-restore query.
+    ///
     /// # Errors
     /// Returns `sqlx::Error` on any query failure.
     pub async fn match_cache_entry(
