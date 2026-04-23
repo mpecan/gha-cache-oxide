@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use e2e_common::{
     BASE_PATH, Dynamics, ServerHandle, assert_golden, blockid_48, capture_envelope,
     compare_to_golden_value, extract_cache_entry_id, extract_upload_id, get, normalize, post_json,
-    put_bytes, spawn_server,
+    put_bytes, spawn_server, write_or_compare_golden,
 };
 
 /// The payload uploaded and downloaded in the round-trip test. Chosen
@@ -311,5 +311,79 @@ mod normalize_tests {
         let act = json!({ "entry_id": 42 }); //     ours regresses to numeric
         let r = std::panic::catch_unwind(|| compare_to_golden_value(&exp, &act, "type-swap"));
         assert!(r.is_err(), "type swap should panic");
+    }
+}
+
+/// Pins the `UPDATE_GOLDEN=1` write branch + the read-and-compare
+/// branch of `write_or_compare_golden`, driven against a `tempfile`
+/// path so no real golden file is touched. Previously only the compare
+/// branch was exercised — a regression in the write path would only
+/// have surfaced during intentional regen.
+#[cfg(test)]
+mod update_golden_regen {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn write_creates_file_and_read_back_matches() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("sub").join("nested.json");
+        let value = json!({
+            "status": 200,
+            "headers": { "content-type": "application/json" },
+            "body": { "ok": true },
+        });
+
+        // Write branch: file didn't exist, parent dir gets created.
+        write_or_compare_golden(&path, &value, /*update=*/ true, "regen");
+        assert!(path.exists(), "update=true should create the file");
+
+        // Read branch with equal value: no panic.
+        write_or_compare_golden(&path, &value, /*update=*/ false, "regen");
+    }
+
+    #[test]
+    fn write_then_compare_with_different_value_panics() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("regen.json");
+        let written = json!({ "ok": true });
+        let probed = json!({ "ok": false });
+
+        write_or_compare_golden(&path, &written, true, "regen");
+        let r = std::panic::catch_unwind(|| {
+            write_or_compare_golden(&path, &probed, false, "regen");
+        });
+        assert!(r.is_err(), "compare branch must panic on mismatch");
+    }
+
+    #[test]
+    fn compare_branch_panics_when_file_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("does_not_exist.json");
+        let value = json!({});
+        let r = std::panic::catch_unwind(|| {
+            write_or_compare_golden(&path, &value, false, "absent");
+        });
+        assert!(
+            r.is_err(),
+            "missing golden must panic with UPDATE_GOLDEN hint"
+        );
+    }
+
+    #[test]
+    fn written_file_is_pretty_printed_with_trailing_newline() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("pretty.json");
+        let value = json!({ "a": 1, "b": 2 });
+        write_or_compare_golden(&path, &value, true, "regen");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.ends_with('\n'),
+            "goldens should end with a trailing newline, got: {contents:?}"
+        );
+        assert!(
+            contents.contains('\n') && contents.contains("  "),
+            "goldens should be pretty-printed, got: {contents:?}"
+        );
     }
 }
