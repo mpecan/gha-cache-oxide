@@ -1,1 +1,7 @@
 /target
+# sqlx-cli local development database for `cargo sqlx prepare`.
+# Production/test paths are elsewhere; this file is transient dev state.
+/dev.db
+/dev.db-journal
+/dev.db-shm
+/dev.db-wal

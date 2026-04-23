@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod routes;
+pub mod state;
 pub mod storage;
 
 use axum::Router;
@@ -19,16 +20,18 @@ use tracing_subscriber::util::{SubscriberInitExt, TryInitError};
 use tracing_subscriber::{EnvFilter, Registry, fmt};
 
 use crate::config::LogFormat;
+use crate::state::AppState;
 
 /// Builds the HTTP router. Call this from both the binary and tests so the
 /// routing surface cannot drift between them.
 ///
 /// Wires the tower-http `TraceLayer` at the top so every request emits a span
 /// with method/uri; the layer's default response hook logs status and latency.
-pub fn build_app() -> Router {
+pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(routes::health::handler))
         .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 /// Initialises the global tracing subscriber.
