@@ -1,0 +1,10 @@
+{
+  "body": {
+    "ok": true,
+    "signed_upload_url": "<BASE_URL>/devstoreaccount1/upload/<UPLOAD_ID>"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 200
+}

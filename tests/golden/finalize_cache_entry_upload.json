@@ -1,0 +1,10 @@
+{
+  "body": {
+    "entry_id": "<UPLOAD_ID>",
+    "ok": true
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 200
+}
