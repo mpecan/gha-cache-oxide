@@ -30,6 +30,11 @@
 //!   Only reachable if an operator manually flipped the column, or if
 //!   `finalize_merge`'s rollback path ran incorrectly — a
 //!   schema-invariant violation either way.
+//! - Missing merged blob despite `mergedAt` set (external deletion,
+//!   backup restore where DB and storage are out of sync): log at
+//!   warn and fall through to the parts logic rather than returning
+//!   404 on the first failing storage read. Upstream surfaces the
+//!   bubbled storage error. Issue #17 AC.
 //! - Download responses set `Content-Type: application/octet-stream`
 //!   explicitly; upstream leaves the header to whatever h3's
 //!   `sendStream` emits by default. Being explicit matches what the
@@ -159,13 +164,24 @@ async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<Stri
 
     // Merged blob takes precedence: once `merged_at` is set, we serve
     // from the single merged blob (upstream `lib/storage.ts:227-228`).
+    // If the blob is absent (external deletion, backup restore where
+    // DB and storage are out of sync), log and fall through to the
+    // parts logic — issue #17. The next check either 404s on
+    // `parts_deleted_at`, streams surviving parts, or lets the CAS
+    // branch re-merge.
     if location.merged_at.is_some() {
         let name = format!("{}/merged", location.folder_name);
-        return match state.storage.download_stream(&name).await {
-            Ok(stream) => octet_stream_response(stream),
-            Err(StorageError::ObjectNotFound(_)) => not_found("Cache file not found"),
-            Err(e) => internal_error(&e.to_string()),
-        };
+        match state.storage.download_stream(&name).await {
+            Ok(stream) => return octet_stream_response(stream),
+            Err(StorageError::ObjectNotFound(_)) => {
+                tracing::warn!(
+                    location_id = %location.id,
+                    folder = %location.folder_name,
+                    "merged blob missing despite mergedAt set; falling through to parts"
+                );
+            }
+            Err(e) => return internal_error(&e.to_string()),
+        }
     }
 
     // Parts deleted but no merged blob: the cache is stale. Upstream
