@@ -2,9 +2,13 @@
 --
 -- Equivalent to `migrations/sqlite/0001_initial_schema.sql` at the column
 -- and index level; only dialect-specific knobs differ:
---   - SQLite `INTEGER` → Postgres `BIGINT` on count/part-count fields; both
---     represent `i64` in the Rust layer. `partCount`, `finishedPartUploadCount`
---     and `startedPartUploadCount` are `i64` in `entities.rs`.
+--   - SQLite `INTEGER` → Postgres `BIGINT` on count/part-count fields. Rust
+--     represents every count as `i64` in `entities.rs`, so narrowing these
+--     to `INTEGER` on Postgres (as upstream Kysely's `'integer'` mapping
+--     does) would silently truncate values > 2^31 back through sqlx. The
+--     widen is intentional; `pg_dump` taken by the upstream server won't
+--     restore into this schema verbatim, but live-data reads/writes
+--     round-trip cleanly in both directions.
 --   - SQLite `BIGINT` timestamp columns → Postgres `BIGINT` (same Rust type).
 --   - Column-name casing is preserved verbatim (camelCase). Postgres folds
 --     unquoted identifiers to lowercase, so every camelCase column name is
