@@ -34,16 +34,61 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let state = AppState::new(db, storage, jwks, config);
+    // Hold a tracker clone so we can drain in-flight merges after
+    // axum::serve returns; `state` itself is consumed by `build_app`.
+    let state_merges_clone = state.merges.clone();
     let app = gha_cache_oxide::build_app(state);
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding TCP listener on {addr}"))?;
 
     tracing::info!(%addr, "gha-cache-oxide listening");
+    // Clone the tracker so the server can still close it after serve()
+    // returns. `merges` lives on `AppState` which was moved into the
+    // router; we keep our own handle for the post-serve drain.
+    let merge_tracker = state_merges_clone;
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("axum::serve terminated with an error")?;
+
+    // Port of upstream's `nitro.hooks.hook('close', () =>
+    // storage.waitForOngoingMerges())` in `plugins/setup.ts`.
+    // Finish any lazy-merge tasks that were still streaming to the
+    // merged blob when the shutdown signal arrived; the CLI only
+    // exits once this is done so a SIGTERM mid-download still lands
+    // the merged blob.
+    tracing::info!("awaiting in-flight lazy merges");
+    merge_tracker.shutdown().await;
+    tracing::info!("shutdown complete");
     Ok(())
+}
+
+/// Completes when the process receives a shutdown signal: `SIGINT`
+/// (Ctrl-C) on every platform, plus `SIGTERM` on Unix. Either closes
+/// the listener so axum stops accepting new connections; the
+/// `serve(...).with_graceful_shutdown(...)` future returns once the
+/// in-flight requests drain.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => tracing::info!("SIGINT received, shutting down"),
+        () = terminate => tracing::info!("SIGTERM received, shutting down"),
+    }
 }
 
 /// Creates a `Db` handle for the configured driver. `SQLite` and Postgres

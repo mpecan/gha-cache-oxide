@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::auth::JwksCache;
 use crate::config::AppConfig;
 use crate::db::Db;
+use crate::merge::MergeTracker;
 use crate::storage::StorageAdapter;
 
 /// Application state. Cloned cheaply — every field is itself `Arc`-ish.
@@ -18,6 +19,9 @@ pub struct AppState {
     pub storage: Arc<dyn StorageAdapter>,
     pub jwks: Arc<JwksCache>,
     pub config: Arc<AppConfig>,
+    /// Tracks in-flight lazy-merge tasks so graceful shutdown can
+    /// await them. Shared via `Clone` (internal `Arc`).
+    pub merges: MergeTracker,
 }
 
 impl AppState {
@@ -35,6 +39,7 @@ impl AppState {
             storage,
             jwks,
             config: Arc::new(config),
+            merges: MergeTracker::new(),
         }
     }
 }
