@@ -14,7 +14,7 @@ use crate::storage::StorageAdapter;
 /// Application state. Cloned cheaply — every field is itself `Arc`-ish.
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Db,
+    pub db: Arc<dyn Db>,
     pub storage: Arc<dyn StorageAdapter>,
     pub jwks: Arc<JwksCache>,
     pub config: Arc<AppConfig>,
@@ -25,7 +25,7 @@ impl AppState {
     /// adapter wrapped for shared access, a JWKS cache, and a config.
     #[must_use]
     pub fn new(
-        db: Db,
+        db: Arc<dyn Db>,
         storage: Arc<dyn StorageAdapter>,
         jwks: Arc<JwksCache>,
         config: AppConfig,

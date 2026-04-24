@@ -110,7 +110,7 @@ async fn create_cache_entry_with_inflight_upload_returns_ok_false() {
     assert_eq!(body, json!({"ok": false}));
 
     // Second upload row must NOT have been inserted.
-    assert_eq!(count(&h.db, "SELECT COUNT(*) FROM uploads").await, 1);
+    assert_eq!(count(&*h.db, "SELECT COUNT(*) FROM uploads").await, 1);
 }
 
 #[tokio::test]
@@ -215,10 +215,10 @@ async fn finalize_happy_path_returns_entry_id_and_persists_cache_entry() {
     assert_eq!(body["ok"], json!(true));
     assert_eq!(body["entry_id"], json!(id.to_string()));
 
-    assert_eq!(count(&h.db, "SELECT COUNT(*) FROM uploads").await, 0);
-    assert_eq!(count(&h.db, "SELECT COUNT(*) FROM cache_entries").await, 1);
+    assert_eq!(count(&*h.db, "SELECT COUNT(*) FROM uploads").await, 0);
+    assert_eq!(count(&*h.db, "SELECT COUNT(*) FROM cache_entries").await, 1);
     assert_eq!(
-        count(&h.db, "SELECT COUNT(*) FROM storage_locations").await,
+        count(&*h.db, "SELECT COUNT(*) FROM storage_locations").await,
         1
     );
 }
@@ -249,7 +249,7 @@ async fn finalize_started_finished_mismatch_is_400_and_deletes_upload() {
     );
 
     assert_eq!(
-        count(&h.db, "SELECT COUNT(*) FROM uploads").await,
+        count(&*h.db, "SELECT COUNT(*) FROM uploads").await,
         0,
         "uploads row must be deleted on mismatch"
     );
@@ -277,7 +277,7 @@ async fn finalize_disk_count_mismatch_is_400_and_deletes_upload() {
         "expected DiskCountMismatch wording, got: {msg}"
     );
 
-    assert_eq!(count(&h.db, "SELECT COUNT(*) FROM uploads").await, 0);
+    assert_eq!(count(&*h.db, "SELECT COUNT(*) FROM uploads").await, 0);
 }
 
 #[tokio::test]
@@ -303,7 +303,7 @@ async fn finalize_no_parts_uploaded_is_400_and_deletes_upload() {
         msg.contains("no parts"),
         "expected NoPartsUploaded wording, got: {msg}"
     );
-    assert_eq!(count(&h.db, "SELECT COUNT(*) FROM uploads").await, 0);
+    assert_eq!(count(&*h.db, "SELECT COUNT(*) FROM uploads").await, 0);
 }
 
 #[tokio::test]

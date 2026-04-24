@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use gha_cache_oxide::auth::{HttpJwksFetcher, JwksCache};
 use gha_cache_oxide::config::{AppConfig, DbConfig, PostgresConfig, StorageConfig};
-use gha_cache_oxide::db::Db;
+use gha_cache_oxide::db::{Db, PostgresDb, SqliteDb};
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::{FilesystemAdapter, S3Adapter, S3Config, StorageAdapter};
 use tokio::net::TcpListener;
@@ -48,16 +48,20 @@ async fn main() -> anyhow::Result<()> {
 
 /// Creates a `Db` handle for the configured driver. `SQLite` and Postgres
 /// are wired up; `MySQL` is defined in the config contract but deferred.
-async fn connect_db(cfg: &DbConfig) -> anyhow::Result<Db> {
+async fn connect_db(cfg: &DbConfig) -> anyhow::Result<Arc<dyn Db>> {
     match cfg {
-        DbConfig::Sqlite { path } => Db::connect_sqlite(path)
-            .await
-            .with_context(|| format!("opening sqlite database at {}", path.display())),
+        DbConfig::Sqlite { path } => {
+            let db = SqliteDb::connect(path)
+                .await
+                .with_context(|| format!("opening sqlite database at {}", path.display()))?;
+            Ok(Arc::new(db))
+        }
         DbConfig::Postgres(pg) => {
             let url = postgres_url(pg);
-            Db::connect_postgres(&url)
+            let db = PostgresDb::connect(&url)
                 .await
-                .context("connecting to postgres database")
+                .context("connecting to postgres database")?;
+            Ok(Arc::new(db))
         }
         DbConfig::Mysql { .. } => {
             anyhow::bail!("DB_DRIVER=mysql is deferred; use DB_DRIVER=sqlite or DB_DRIVER=postgres")

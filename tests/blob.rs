@@ -265,17 +265,22 @@ async fn download_with_parts_deleted_but_not_merged_is_404() {
     let entry_id = finalize_and_get_cache_entry_id(&h, &token).await;
 
     // Flip parts_deleted_at on the corresponding storage_location.
-    let mut tx = h.db.begin().await.unwrap();
-    sqlx::query(
-        "UPDATE storage_locations SET partsDeletedAt = ? \
-         WHERE id = (SELECT locationId FROM cache_entries WHERE id = ?)",
-    )
-    .bind(1_234_567_i64)
-    .bind(&entry_id)
-    .execute(&mut **tx.sqlite_tx().expect("SQLite test harness"))
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    // Two-step against the pool directly: read the locationId, then run
+    // the UPDATE; keeps us on the driver-agnostic trait surface and off
+    // the raw Transaction type.
+    let pool = h.db.as_sqlite_pool().expect("SQLite test harness");
+    let location_id: String =
+        sqlx::query_scalar("SELECT locationId FROM cache_entries WHERE id = ?")
+            .bind(&entry_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE storage_locations SET partsDeletedAt = ? WHERE id = ?")
+        .bind(1_234_567_i64)
+        .bind(&location_id)
+        .execute(pool)
+        .await
+        .unwrap();
 
     let resp = h.router.oneshot(get_download(&entry_id)).await.unwrap();
     let (status, body) = body_json(resp).await;
@@ -341,18 +346,17 @@ async fn download_touches_last_downloaded_at() {
 
     // Give the fire-and-forget task a few ticks; 500ms is generous for
     // a single UPDATE against an in-memory SQLite.
+    let pool = h.db.as_sqlite_pool().expect("SQLite test harness");
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {
-        let mut tx = h.db.begin().await.unwrap();
         let value: Option<i64> = sqlx::query_scalar(
             "SELECT lastDownloadedAt FROM storage_locations \
              WHERE id = (SELECT locationId FROM cache_entries WHERE id = ?)",
         )
         .bind(&entry_id)
-        .fetch_one(&mut **tx.sqlite_tx().expect("SQLite test harness"))
+        .fetch_one(pool)
         .await
         .unwrap();
-        tx.rollback().await.unwrap();
         if value.is_some() {
             break;
         }

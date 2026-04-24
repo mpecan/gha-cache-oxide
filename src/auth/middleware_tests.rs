@@ -26,7 +26,7 @@ use tower::ServiceExt;
 use super::{AuthError, CacheScope, GITHUB_ISSUER};
 use crate::auth::{JwkEntry, JwksCache, JwksFetcher, require_github_token};
 use crate::config::{AppConfig, DbConfig, LogFormat, StorageConfig};
-use crate::db::Db;
+use crate::db::{Db, SqliteDb};
 use crate::state::AppState;
 use crate::storage::FilesystemAdapter;
 
@@ -143,8 +143,9 @@ struct TestHarness {
 
 async fn build_harness(entries: Vec<JwkEntry>, skip_validation: bool) -> TestHarness {
     let tmp = tempfile::TempDir::new().unwrap();
-    let db = Db::connect_in_memory().await.unwrap();
+    let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
+    let db: Arc<dyn Db> = Arc::new(db);
     let storage = Arc::new(FilesystemAdapter::new(tmp.path()).unwrap());
     let fetcher = StaticFetcher::new(entries);
     let jwks = Arc::new(JwksCache::new(fetcher.clone()));

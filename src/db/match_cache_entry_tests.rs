@@ -1,6 +1,6 @@
 //! Tests for [`Db::match_cache_entry`], split into its own file so the
 //! production module and the sibling tests each stay well under the
-//! 500-line soft limit. Attached via `#[path]` from `queries.rs`.
+//! 500-line soft limit. Attached via `#[path]` from `sqlite.rs`.
 //!
 //! Every scenario seeds rows through a small `seed_entry` helper (a
 //! `storage_locations` + `cache_entries` pair per entry) so the tests
@@ -9,12 +9,12 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 use super::*;
-use crate::db::entities::{MatchRequest, MatchType};
+use crate::db::Db;
+use crate::db::entities::{CacheEntryCoord, MatchRequest, MatchType};
 use crate::db::id::new_uuid;
-use crate::db::tx::insert_storage_location_tx;
 
-async fn test_db() -> Db {
-    let db = Db::connect_in_memory().await.unwrap();
+async fn test_db() -> SqliteDb {
+    let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
     db
 }
@@ -32,25 +32,24 @@ struct Seed<'a> {
 /// Inserts a `storage_locations` row plus a `cache_entries` row pointing
 /// at it. Returns the generated cache-entry id so callers can assert
 /// which row came back.
-async fn seed_entry(db: &Db, s: Seed<'_>) -> String {
+async fn seed_entry(db: &SqliteDb, s: Seed<'_>) -> String {
     let location_id = new_uuid();
     let entry_id = new_uuid();
     let mut tx = db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, &location_id, &format!("folder-{entry_id}"), 1)
+    tx.insert_storage_location(&location_id, &format!("folder-{entry_id}"), 1)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO cache_entries (id, key, version, scope, repoId, updatedAt, locationId) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    tx.seed_cache_entry(
+        &entry_id,
+        CacheEntryCoord {
+            key: s.key,
+            version: s.version,
+            scope: s.scope,
+            repo_id: s.repo_id,
+        },
+        s.updated_at_ms,
+        &location_id,
     )
-    .bind(&entry_id)
-    .bind(s.key)
-    .bind(s.version)
-    .bind(s.scope)
-    .bind(s.repo_id)
-    .bind(s.updated_at_ms)
-    .bind(&location_id)
-    .execute(&mut **tx.sqlite_tx().expect("SQLite test harness"))
     .await
     .unwrap();
     tx.commit().await.unwrap();
@@ -59,7 +58,7 @@ async fn seed_entry(db: &Db, s: Seed<'_>) -> String {
 
 /// Shorthand: seed a row in the default scope/repo/version with a given
 /// key and `updatedAt` value. Most tests only vary key and time.
-async fn seed(db: &Db, key: &str, updated_at_ms: i64) -> String {
+async fn seed(db: &SqliteDb, key: &str, updated_at_ms: i64) -> String {
     seed_entry(
         db,
         Seed {
@@ -74,7 +73,7 @@ async fn seed(db: &Db, key: &str, updated_at_ms: i64) -> String {
 }
 
 /// Seed helper that varies the scope on top of the default version/repo.
-async fn seed_in_scope(db: &Db, key: &str, scope: &str, updated_at_ms: i64) -> String {
+async fn seed_in_scope(db: &SqliteDb, key: &str, scope: &str, updated_at_ms: i64) -> String {
     seed_entry(
         db,
         Seed {

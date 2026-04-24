@@ -23,7 +23,7 @@ use axum::http::{Request, StatusCode, header};
 use base64::Engine;
 use gha_cache_oxide::auth::{AuthError, JwkEntry, JwksCache, JwksFetcher};
 use gha_cache_oxide::config::{AppConfig, DbConfig, LogFormat, StorageConfig};
-use gha_cache_oxide::db::Db;
+use gha_cache_oxide::db::{Db, SqliteDb};
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::FilesystemAdapter;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -112,14 +112,15 @@ pub fn read_only_token() -> String {
 
 pub struct Harness {
     pub router: axum::Router,
-    pub db: Db,
+    pub db: Arc<dyn Db>,
     pub tmp: TempDir,
 }
 
 pub async fn harness() -> Harness {
     let tmp = TempDir::new().unwrap();
-    let db = Db::connect_in_memory().await.unwrap();
+    let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
+    let db: Arc<dyn Db> = Arc::new(db);
     let storage: Arc<dyn gha_cache_oxide::storage::StorageAdapter> =
         Arc::new(FilesystemAdapter::new(tmp.path()).unwrap());
     let jwks = Arc::new(JwksCache::new(Arc::new(StaticFetcher)));
@@ -168,25 +169,19 @@ pub async fn body_json(resp: axum::response::Response) -> (StatusCode, Value) {
     (status, value)
 }
 
-/// Read-only `SELECT COUNT(*)` helper. Uses `Db::begin()` (the only
-/// public path for raw queries from outside the crate) and rolls back
-/// so the count itself doesn't mutate state.
-pub async fn count(db: &Db, sql: &str) -> i64 {
-    let mut tx = db.begin().await.unwrap();
-    let n: i64 = sqlx::query_scalar(sql)
-        .fetch_one(&mut **tx.sqlite_tx().expect("SQLite test harness"))
+/// Read-only `SELECT COUNT(*)` helper running directly against the
+/// `SQLite` pool. Test harness is `SQLite`-only, so `as_sqlite_pool()`
+/// always returns `Some` here.
+pub async fn count(db: &dyn Db, sql: &str) -> i64 {
+    sqlx::query_scalar(sql)
+        .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
-        .unwrap();
-    tx.rollback().await.unwrap();
-    n
+        .unwrap()
 }
 
-pub async fn fetch_string(db: &Db, sql: &str) -> String {
-    let mut tx = db.begin().await.unwrap();
-    let s: String = sqlx::query_scalar(sql)
-        .fetch_one(&mut **tx.sqlite_tx().expect("SQLite test harness"))
+pub async fn fetch_string(db: &dyn Db, sql: &str) -> String {
+    sqlx::query_scalar(sql)
+        .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
-        .unwrap();
-    tx.rollback().await.unwrap();
-    s
+        .unwrap()
 }

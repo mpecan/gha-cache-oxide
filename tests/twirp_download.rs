@@ -8,7 +8,6 @@ mod twirp_common;
 
 use axum::http::StatusCode;
 use gha_cache_oxide::db::entities::CacheEntryCoord;
-use gha_cache_oxide::db::tx::{insert_storage_location_tx, upsert_cache_entry_tx};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -20,7 +19,7 @@ async fn seed_cache_entry(h: &Harness, key: &str, scope: &str, updated_at: i64) 
     use gha_cache_oxide::db::id::new_uuid;
     let location_id = new_uuid();
     let mut tx = h.db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, &location_id, &format!("folder-{location_id}"), 1)
+    tx.insert_storage_location(&location_id, &format!("folder-{location_id}"), 1)
         .await
         .unwrap();
     let coord = CacheEntryCoord {
@@ -29,12 +28,13 @@ async fn seed_cache_entry(h: &Harness, key: &str, scope: &str, updated_at: i64) 
         scope,
         repo_id: "42",
     };
-    let _ = upsert_cache_entry_tx(&mut tx, coord, &location_id, updated_at)
+    let _ = tx
+        .upsert_cache_entry(coord, &location_id, updated_at)
         .await
         .unwrap();
     tx.commit().await.unwrap();
     fetch_string(
-        &h.db,
+        &*h.db,
         &format!(
             "SELECT id FROM cache_entries WHERE key = '{key}' AND scope = '{scope}' \
              AND version = 'v1' AND repoId = '42'"
