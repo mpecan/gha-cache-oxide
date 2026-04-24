@@ -1,25 +1,44 @@
 //! S3-compatible storage adapter on top of `object_store::aws::AmazonS3`.
 //!
-//! Parity note: upstream (`lib/storage.ts#S3Adapter`) prefixes every key
-//! with `gh-actions-cache/`, signs download URLs for 10 minutes, and
-//! HEAD-bucket probes on startup so a misconfigured bucket fails loudly
-//! before any request lands. We match all three — a bucket populated by
-//! the upstream TypeScript server remains readable by this adapter
-//! (and vice-versa).
+//! # Upstream parity
 //!
-//! Addressing is path-style (`forcePathStyle` in upstream,
-//! `with_virtual_hosted_style_request(false)` here) so `MinIO` / Garage /
-//! Ceph work without per-host DNS juggling.
+//! Upstream reference: `lib/storage.ts#S3Adapter`. The observable
+//! on-the-wire contract matches:
+//!
+//! - key prefix `gh-actions-cache/` — a bucket populated by the upstream
+//!   TypeScript server remains readable by this adapter (and vice-versa);
+//! - 10-minute signed download-URL TTL;
+//! - bucket probe at startup so a misconfigured bucket fails loudly
+//!   before the first cache request;
+//! - path-style addressing (`forcePathStyle` in upstream,
+//!   `with_virtual_hosted_style_request(false)` here) so `MinIO` /
+//!   Garage / Ceph work without per-host DNS juggling.
+//!
+//! # Deliberate deviations
+//!
+//! - **Multipart upload sizing.** Upstream caps per-part at 5 MiB with
+//!   `queueSize: 1` (strictly serial). We use `BufWriter`'s 10 MiB
+//!   default chunk with `with_max_concurrency(4)` so we saturate the
+//!   link on fast paths while holding peak memory to ~40 MiB. The wire
+//!   format is still S3 multipart, so objects remain drop-in readable
+//!   by the upstream server.
+//! - **Bucket probe.** Upstream issues `HeadBucketCommand`; we do
+//!   `store.list(None).next().await` — one round-trip, carries the same
+//!   missing / auth-denied signal with less AWS-specific API surface.
+//!
+//! Conditional-commit (If-Match / `PutMode`) support lands in issue #34;
+//! no placeholder is reserved here — grep for `PutMode` when that work
+//! starts.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
+use object_store::ObjectStore;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::buffered::BufWriter;
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
-use object_store::{ObjectStore, PutMode};
 use reqwest::Method;
 use tokio::io::AsyncWriteExt;
 use url::Url;
@@ -245,15 +264,6 @@ fn translate_not_found(err: object_store::Error, name: &str) -> StorageError {
         StorageError::Backend(err)
     }
 }
-
-// ------------------------------------------------------------------------
-// Silence dead_code / unused_imports on the `PutMode` re-export: we don't
-// reference it yet, but leaving the import here signposts where `If-Match`
-// semantics would plug in when #34 (conditional commit) lands. Revisit
-// when that issue reaches this module.
-// ------------------------------------------------------------------------
-#[allow(dead_code)]
-const _: Option<PutMode> = None;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]

@@ -62,17 +62,16 @@ async fn missing_bucket_produces_clear_error() {
     .await
     .unwrap_err();
 
+    // Variant-match only: the variant itself carries the "clear error"
+    // signal the issue asks for, and the bucket field carries the name
+    // operators need. Substring-matching the underlying
+    // `object_store::Error` was brittle — different S3 implementations
+    // phrase 404s differently (MinIO / Garage / AWS each return their
+    // own wording), and a network error ("connection refused") would
+    // still reach this arm correctly but fail a wording assertion.
     match err {
-        StorageError::BucketUnavailable {
-            bucket: b,
-            ref source,
-        } => {
+        StorageError::BucketUnavailable { bucket: b, .. } => {
             assert_eq!(b, bucket, "error should carry the bucket name we passed");
-            let msg = source.to_string().to_lowercase();
-            assert!(
-                msg.contains("bucket") || msg.contains("not found") || msg.contains("nosuch"),
-                "underlying error should mention the bucket issue, got: {source}"
-            );
         }
         other => panic!("expected StorageError::BucketUnavailable, got {other:?}"),
     }

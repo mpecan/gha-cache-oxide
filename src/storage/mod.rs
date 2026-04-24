@@ -44,6 +44,7 @@ pub enum StorageError {
     #[error("s3 bucket {bucket:?} is unavailable: {source}")]
     BucketUnavailable {
         bucket: String,
+        #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
