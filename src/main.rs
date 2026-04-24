@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use gha_cache_oxide::auth::{HttpJwksFetcher, JwksCache};
 use gha_cache_oxide::config::{AppConfig, DbConfig, PostgresConfig, StorageConfig};
+use gha_cache_oxide::db::id::now_ms;
 use gha_cache_oxide::db::{Db, PostgresDb, SqliteDb};
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::{FilesystemAdapter, S3Adapter, S3Config, StorageAdapter};
@@ -24,6 +25,10 @@ async fn main() -> anyhow::Result<()> {
     let db = connect_db(&config.database).await?;
     db.migrate().await.context("running database migrations")?;
     tracing::info!("database ready");
+
+    gha_cache_oxide::run_startup_sweep(&*db, now_ms())
+        .await
+        .context("clearing stale merge claims on startup")?;
 
     let storage = connect_storage(&config.storage).await?;
     tracing::info!("storage ready");

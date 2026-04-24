@@ -211,6 +211,20 @@ impl Db for SqliteDb {
         Ok(())
     }
 
+    async fn clear_stale_merge_claims(&self, cutoff_ms: i64) -> Result<u64, sqlx::Error> {
+        let rows = sqlx::query(
+            "UPDATE storage_locations SET mergeStartedAt = NULL \
+             WHERE mergeStartedAt IS NOT NULL \
+               AND mergedAt IS NULL \
+               AND mergeStartedAt < ?",
+        )
+        .bind(cutoff_ms)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows)
+    }
+
     async fn find_entry_by_exact_key(
         &self,
         key: &str,
