@@ -10,6 +10,9 @@
 
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
+mod recovery;
+pub use recovery::*;
+
 use gha_cache_oxide::db::Db;
 use gha_cache_oxide::db::entities::{CacheEntryCoord, MatchRequest, MatchType, NewUpload};
 use gha_cache_oxide::db::id::{new_upload_id, new_uuid};

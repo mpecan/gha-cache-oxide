@@ -191,6 +191,23 @@ pub trait Db: Send + Sync {
     /// Returns `sqlx::Error` on update failure.
     async fn reset_merge_flags(&self, location_id: &str) -> Result<(), sqlx::Error>;
 
+    /// Clears `mergeStartedAt` on every row where a lazy-merge was
+    /// claimed but never finalized and the claim is older than
+    /// `cutoff_ms`. Returns the number of rows updated.
+    ///
+    /// Called once at server startup (issue #17). A process crash
+    /// between the CAS claim and `finalize_merge` leaves
+    /// `mergeStartedAt` set and `mergedAt` NULL forever — the download
+    /// path would then read "another merger in flight" and stream
+    /// parts on every request, never re-running the merge. Clearing
+    /// the column restores the idle state so the next download wins
+    /// the CAS and re-runs the merge; `mergedAt` (already NULL) is
+    /// left alone so the schema invariant "both NULL ⇒ idle" holds.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on update failure.
+    async fn clear_stale_merge_claims(&self, cutoff_ms: i64) -> Result<u64, sqlx::Error>;
+
     // ---- match_cache_entry (dialect-specific queries, default walk) ----
 
     /// Fetches the single most-recently-updated `cache_entries` row

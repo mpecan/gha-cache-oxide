@@ -183,6 +183,9 @@ pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::lazy_merge_cas_winner_and_loser(db).await;
     scenarios::lazy_merge_mark_and_reset_round_trip(db).await;
     scenarios::lazy_merge_mark_parts_deleted_shape(db).await;
+    scenarios::clear_stale_merge_claims_clears_old_claims(db).await;
+    scenarios::clear_stale_merge_claims_leaves_fresh_claims(db).await;
+    scenarios::clear_stale_merge_claims_ignores_completed_and_idle_rows(db).await;
 }
 
 // ------------------------------------------------------------------------
@@ -243,6 +246,9 @@ db_conformance_cases!(
     lazy_merge_cas_winner_and_loser,
     lazy_merge_mark_and_reset_round_trip,
     lazy_merge_mark_parts_deleted_shape,
+    clear_stale_merge_claims_clears_old_claims,
+    clear_stale_merge_claims_leaves_fresh_claims,
+    clear_stale_merge_claims_ignores_completed_and_idle_rows,
 );
 
 db_conformance_cases!(
@@ -268,6 +274,9 @@ db_conformance_cases!(
     lazy_merge_cas_winner_and_loser,
     lazy_merge_mark_and_reset_round_trip,
     lazy_merge_mark_parts_deleted_shape,
+    clear_stale_merge_claims_clears_old_claims,
+    clear_stale_merge_claims_leaves_fresh_claims,
+    clear_stale_merge_claims_ignores_completed_and_idle_rows,
 );
 
 /// Smoke test for the programmatic runner — `SQLite` entry point always
