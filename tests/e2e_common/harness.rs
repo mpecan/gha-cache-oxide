@@ -17,7 +17,7 @@ use axum::Router;
 use base64::Engine;
 use gha_cache_oxide::auth::{AuthError, JwkEntry, JwksCache, JwksFetcher};
 use gha_cache_oxide::config::{AppConfig, DbConfig, LogFormat, StorageConfig};
-use gha_cache_oxide::db::Db;
+use gha_cache_oxide::db::{Db, SqliteDb};
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::FilesystemAdapter;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -129,8 +129,9 @@ impl Drop for ServerHandle {
 /// here, letting `reqwest` follow them verbatim.
 pub async fn spawn_server() -> ServerHandle {
     let tmp = TempDir::new().unwrap();
-    let db = Db::connect_in_memory().await.unwrap();
+    let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
+    let db: Arc<dyn Db> = Arc::new(db);
     let storage: Arc<dyn gha_cache_oxide::storage::StorageAdapter> =
         Arc::new(FilesystemAdapter::new(tmp.path()).unwrap());
     let jwks = Arc::new(JwksCache::new(Arc::new(StaticFetcher)));

@@ -181,7 +181,7 @@ async fn finalize_cache_entry_upload(
     };
 
     match complete_upload(
-        &state.db,
+        &*state.db,
         state.storage.as_ref(),
         CompleteUploadParams {
             coord,

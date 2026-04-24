@@ -18,13 +18,18 @@
 //!   `CreateCacheEntry`, so a miss is unrecoverable and a silent success
 //!   would violate the constitution's "never silently fall back or
 //!   swallow errors" rule.
-//! - Lazy merge (upstream's background part-concatenation task that
-//!   writes a `/merged` blob during `download()`) is explicitly out of
-//!   scope (issue #9 "Out of Scope: Lazy merge"). We stream parts
-//!   0..`part_count` back-to-back on every download. The `merged_at` /
-//!   `parts_deleted_at` columns are still observed: if a future change
-//!   introduces merging we serve the merged blob, and if parts have
-//!   been deleted post-merge we 404 rather than truncating mid-stream.
+//! - Lazy merge (`merge::start_lazy_merge`) claims the merge via a
+//!   compare-and-swap on `mergeStartedAt`. Upstream reads the column
+//!   and races two concurrent first-downloads into two merges; the CAS
+//!   here guarantees **exactly one** merger per location (issue #15
+//!   AC). The CAS loser falls back to streaming parts directly —
+//!   same branch upstream takes when `mergeStartedAt` is already set.
+//! - Terminal 404 when `partsDeletedAt` is set but `mergedAt` is not:
+//!   upstream would start a merge over missing parts; we surface it
+//!   as a terminal cache miss rather than risk a partial download.
+//!   Only reachable if an operator manually flipped the column, or if
+//!   `finalize_merge`'s rollback path ran incorrectly — a
+//!   schema-invariant violation either way.
 //! - Download responses set `Content-Type: application/octet-stream`
 //!   explicitly; upstream leaves the header to whatever h3's
 //!   `sendStream` emits by default. Being explicit matches what the
@@ -50,6 +55,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::db::id::now_ms;
+use crate::merge::{self, LazyMergeOutcome};
 use crate::routes::errors::{bad_request, internal_error, not_found};
 use crate::state::AppState;
 use crate::storage::{ByteStream, StorageAdapter, StorageError};
@@ -151,8 +157,8 @@ async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<Stri
 
     spawn_touch_last_downloaded(&state, &location.id);
 
-    // Merged blob (only ever populated once #10+ introduces lazy merge)
-    // takes precedence; parity with upstream `lib/storage.ts:227-228`.
+    // Merged blob takes precedence: once `merged_at` is set, we serve
+    // from the single merged blob (upstream `lib/storage.ts:227-228`).
     if location.merged_at.is_some() {
         let name = format!("{}/merged", location.folder_name);
         return match state.storage.download_stream(&name).await {
@@ -163,17 +169,16 @@ async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<Stri
     }
 
     // Parts deleted but no merged blob: the cache is stale. Upstream
-    // would race the merge here; we don't implement lazy merge so we
-    // 404 instead of leaking a partial download.
+    // would race the merge here; we treat it as a terminal cache miss
+    // to avoid leaking a partial download.
     if location.parts_deleted_at.is_some() {
         return not_found("Cache file not found");
     }
 
     // `partCount` is declared `INTEGER NOT NULL` in the schema and
-    // written via `insert_storage_location_tx` from a `u64` count — so a
-    // negative value would be a schema invariant violation. Surface it
-    // as a 500 rather than silently coercing to zero (which would
-    // truncate the download to an empty body).
+    // written via `DbTx::insert_storage_location` from a `u64` count —
+    // so a negative value would be a schema invariant violation.
+    // Surface it as a 500 rather than silently coercing to zero.
     let Ok(expected_parts) = u64::try_from(location.part_count) else {
         return internal_error(&format!(
             "negative partCount ({}) on storage_location {}",
@@ -190,7 +195,35 @@ async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<Stri
     {
         return resp;
     }
-    stream_parts_response(state.storage.clone(), location.folder_name, expected_parts)
+
+    // If someone else is already merging (`merge_started_at` set),
+    // stream parts directly — upstream's
+    // `downloadFromCacheEntryLocation` path.
+    if location.merge_started_at.is_some() {
+        return stream_parts_response(state.storage.clone(), location.folder_name, expected_parts);
+    }
+
+    // Cold cache: claim the merge via CAS and tee the parts into a
+    // merged blob on the way out.
+    let folder = location.folder_name.clone();
+    match merge::start_lazy_merge(
+        state.db.clone(),
+        state.storage.clone(),
+        &state.merges,
+        location,
+    )
+    .await
+    {
+        Ok(LazyMergeOutcome::Claimed(stream)) => octet_stream_response(stream),
+        // Lost the CAS to another concurrent request. Parts are still
+        // intact (the winner only deletes them after `merged_at` is
+        // set); stream them directly. The winner's merge will still
+        // land.
+        Ok(LazyMergeOutcome::LostRace) => {
+            stream_parts_response(state.storage.clone(), folder, expected_parts)
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 /// Best-effort `UPDATE storage_locations SET lastDownloadedAt = ?`.

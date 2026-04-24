@@ -41,23 +41,25 @@
     clippy::too_long_first_doc_paragraph
 )]
 
-use gha_cache_oxide::db::Db;
+use std::sync::Arc;
+
+use gha_cache_oxide::db::{Db, PostgresDb, SqliteDb};
 
 // ------------------------------------------------------------------------
 // Setup plumbing
 // ------------------------------------------------------------------------
 
-/// Tuple returned by a driver's setup: `Db` + RAII guard. The guard is
-/// `Box<dyn Send>` so the macro stays driver-agnostic — `SQLite`'s
-/// in-memory pool needs no extra handle today; Postgres may hand back a
-/// container-scoped cleanup future tomorrow without changing the macro
-/// body.
-pub type SetupResult = (Db, Box<dyn Send>);
+/// Tuple returned by a driver's setup: `Arc<dyn Db>` + RAII guard. The
+/// guard is `Box<dyn Send>` so the macro stays driver-agnostic —
+/// `SQLite`'s in-memory pool needs no extra handle today; Postgres
+/// hands back a schema-cleanup `SchemaGuard` that drops the per-test
+/// schema on scope exit.
+pub type SetupResult = (Arc<dyn Db>, Box<dyn Send>);
 
 async fn sqlite_setup() -> SetupResult {
-    let db = Db::connect_in_memory().await.unwrap();
+    let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
-    (db, Box::new(()))
+    (Arc::new(db), Box::new(()))
 }
 
 /// RAII guard that drops the per-test Postgres schema on scope exit.
@@ -134,11 +136,11 @@ async fn postgres_setup() -> SetupResult {
     } else {
         format!("{base_url}?options=-c%20search_path%3D{schema}")
     };
-    let db = Db::connect_postgres(&url).await.unwrap();
+    let db = PostgresDb::connect(&url).await.unwrap();
     db.migrate().await.unwrap();
 
     (
-        db,
+        Arc::new(db),
         Box::new(SchemaGuard {
             url: base_url,
             schema,
@@ -161,7 +163,7 @@ mod scenarios;
 ///
 /// # Panics
 /// Any failing scenario panics with the scenario-level assertion.
-pub async fn run_conformance_suite(db: &Db) {
+pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::upload_lifecycle_round_trip(db).await;
     scenarios::find_upload_by_coord_discriminates_each_field(db).await;
     scenarios::update_helpers_are_noops_on_unknown_ids(db).await;
@@ -178,6 +180,9 @@ pub async fn run_conformance_suite(db: &Db) {
     scenarios::finalize_transaction_rollback_is_atomic(db).await;
     scenarios::finalize_transaction_full_commit_shape(db).await;
     scenarios::deleting_storage_location_cascades_to_cache_entry(db).await;
+    scenarios::lazy_merge_cas_winner_and_loser(db).await;
+    scenarios::lazy_merge_mark_and_reset_round_trip(db).await;
+    scenarios::lazy_merge_mark_parts_deleted_shape(db).await;
 }
 
 // ------------------------------------------------------------------------
@@ -196,7 +201,7 @@ macro_rules! db_conformance_cases {
                 #[tokio::test]
                 async fn $scenario() {
                     let (db, _guard) = $setup().await;
-                    scenarios::$scenario(&db).await;
+                    scenarios::$scenario(&*db).await;
                 }
             )+
         }
@@ -209,7 +214,7 @@ macro_rules! db_conformance_cases {
                 #[tokio::test]
                 async fn $scenario() {
                     let (db, _guard) = $setup().await;
-                    scenarios::$scenario(&db).await;
+                    scenarios::$scenario(&*db).await;
                 }
             )+
         }
@@ -235,6 +240,9 @@ db_conformance_cases!(
     finalize_transaction_rollback_is_atomic,
     finalize_transaction_full_commit_shape,
     deleting_storage_location_cascades_to_cache_entry,
+    lazy_merge_cas_winner_and_loser,
+    lazy_merge_mark_and_reset_round_trip,
+    lazy_merge_mark_parts_deleted_shape,
 );
 
 db_conformance_cases!(
@@ -257,6 +265,9 @@ db_conformance_cases!(
     finalize_transaction_rollback_is_atomic,
     finalize_transaction_full_commit_shape,
     deleting_storage_location_cascades_to_cache_entry,
+    lazy_merge_cas_winner_and_loser,
+    lazy_merge_mark_and_reset_round_trip,
+    lazy_merge_mark_parts_deleted_shape,
 );
 
 /// Smoke test for the programmatic runner — `SQLite` entry point always
@@ -265,12 +276,12 @@ db_conformance_cases!(
 #[tokio::test]
 async fn runner_executes_full_suite_against_sqlite() {
     let (db, _guard) = sqlite_setup().await;
-    run_conformance_suite(&db).await;
+    run_conformance_suite(&*db).await;
 }
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL + running Postgres; `cargo test -- --ignored`"]
 async fn runner_executes_full_suite_against_postgres() {
     let (db, _guard) = postgres_setup().await;
-    run_conformance_suite(&db).await;
+    run_conformance_suite(&*db).await;
 }

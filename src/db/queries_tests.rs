@@ -1,15 +1,15 @@
-//! Tests for `src/db/queries.rs`, split out to keep the production file
+//! Tests for `src/db/sqlite.rs`, split out to keep the production file
 //! under the 500-line soft limit. Attached via `#[path]` attribute.
 
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 use super::*;
-use crate::db::entities::CacheEntryCoord;
+use crate::db::Db;
+use crate::db::entities::{CacheEntryCoord, NewUpload, StorageLocation};
 use crate::db::id::{new_upload_id, new_uuid};
-use crate::db::tx::{insert_storage_location_tx, upsert_cache_entry_tx};
 
-async fn test_db() -> Db {
-    let db = Db::connect_in_memory().await.unwrap();
+async fn test_db() -> SqliteDb {
+    let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
     db
 }
@@ -57,7 +57,6 @@ async fn find_upload_by_id_returns_none_for_unknown() {
 #[tokio::test]
 async fn find_upload_by_coord_matches_scope_and_repo() {
     let db = test_db().await;
-    // Same (key, version) but different scope and repoId.
     let a = new_upload_id();
     let b = new_upload_id();
     db.create_upload(NewUpload {
@@ -149,14 +148,14 @@ async fn delete_upload_removes_row() {
 async fn insert_storage_location_roundtrip() {
     let db = test_db().await;
     let mut tx = db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, "loc-1", "folder-x", 7)
+    tx.insert_storage_location("loc-1", "folder-x", 7)
         .await
         .unwrap();
     tx.commit().await.unwrap();
 
     let loc: StorageLocation = sqlx::query_as("SELECT * FROM storage_locations WHERE id = ?")
         .bind("loc-1")
-        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
+        .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_eq!(loc.folder_name, "folder-x");
@@ -170,23 +169,21 @@ async fn insert_storage_location_roundtrip() {
 #[tokio::test]
 async fn find_location_for_entry_joins_correctly() {
     let db = test_db().await;
-    // Seed a location and an entry pointing to it.
     let mut tx = db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, "loc-A", "folder-A", 1)
+    tx.insert_storage_location("loc-A", "folder-A", 1)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO cache_entries (id, key, version, scope, repoId, updatedAt, locationId) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    tx.seed_cache_entry(
+        "entry-A",
+        CacheEntryCoord {
+            key: "k",
+            version: "v",
+            scope: "s",
+            repo_id: "r",
+        },
+        1_700_000_000_000,
+        "loc-A",
     )
-    .bind("entry-A")
-    .bind("k")
-    .bind("v")
-    .bind("s")
-    .bind("r")
-    .bind(1_700_000_000_000_i64)
-    .bind("loc-A")
-    .execute(&mut **tx.sqlite_tx().expect("SQLite test harness"))
     .await
     .unwrap();
     tx.commit().await.unwrap();
@@ -207,7 +204,7 @@ async fn find_location_for_entry_joins_correctly() {
 async fn touch_location_downloaded_sets_timestamp() {
     let db = test_db().await;
     let mut tx = db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, "loc-T", "folder-T", 1)
+    tx.insert_storage_location("loc-T", "folder-T", 1)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -218,52 +215,52 @@ async fn touch_location_downloaded_sets_timestamp() {
 
     let loc: StorageLocation = sqlx::query_as("SELECT * FROM storage_locations WHERE id = ?")
         .bind("loc-T")
-        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
+        .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_eq!(loc.last_downloaded_at, Some(1_700_000_999_000));
 }
 
 #[tokio::test]
-async fn upsert_cache_entry_tx_insert_path_returns_none() {
+async fn upsert_cache_entry_insert_path_returns_none() {
     let db = test_db().await;
     let mut tx = db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, "loc-new", "folder-new", 1)
+    tx.insert_storage_location("loc-new", "folder-new", 1)
         .await
         .unwrap();
-    let previous = upsert_cache_entry_tx(&mut tx, coord(), "loc-new", 1_700_000_000_000)
+    let previous = tx
+        .upsert_cache_entry(coord(), "loc-new", 1_700_000_000_000)
         .await
         .unwrap();
     tx.commit().await.unwrap();
 
     assert!(previous.is_none());
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM cache_entries")
-        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
+        .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_eq!(count.0, 1);
 }
 
 #[tokio::test]
-async fn upsert_cache_entry_tx_update_path_returns_previous_location() {
+async fn upsert_cache_entry_update_path_returns_previous_location() {
     let db = test_db().await;
 
-    // First upsert → insert path.
     let mut tx = db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, "loc-old", "folder-old", 1)
+    tx.insert_storage_location("loc-old", "folder-old", 1)
         .await
         .unwrap();
-    upsert_cache_entry_tx(&mut tx, coord(), "loc-old", 1_000)
+    tx.upsert_cache_entry(coord(), "loc-old", 1_000)
         .await
         .unwrap();
     tx.commit().await.unwrap();
 
-    // Second upsert with same coord → update path.
     let mut tx = db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, "loc-new", "folder-new", 2)
+    tx.insert_storage_location("loc-new", "folder-new", 2)
         .await
         .unwrap();
-    let previous = upsert_cache_entry_tx(&mut tx, coord(), "loc-new", 2_000)
+    let previous = tx
+        .upsert_cache_entry(coord(), "loc-new", 2_000)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -272,11 +269,10 @@ async fn upsert_cache_entry_tx_update_path_returns_previous_location() {
     assert_eq!(previous.id, "loc-old");
     assert_eq!(previous.folder_name, "folder-old");
 
-    // Only one cache_entry row, pointing at loc-new.
     let entries: Vec<(String, String, i64)> =
         sqlx::query_as("SELECT id, locationId, updatedAt FROM cache_entries WHERE key = ?")
             .bind("cache-key")
-            .fetch_all(db.sqlite_pool().expect("SQLite test harness"))
+            .fetch_all(db.as_sqlite_pool().expect("SQLite test harness"))
             .await
             .unwrap();
     assert_eq!(entries.len(), 1);
@@ -286,8 +282,6 @@ async fn upsert_cache_entry_tx_update_path_returns_previous_location() {
 
 #[tokio::test]
 async fn create_upload_with_duplicate_id_fails() {
-    // Upstream relies on PK collisions staying rare; the reserve handler
-    // treats a collision as a DB error. This pins the current contract.
     let db = test_db().await;
     let id = new_upload_id();
     db.create_upload(new_upload(id, "a")).await.unwrap();
@@ -304,8 +298,6 @@ async fn create_upload_with_duplicate_id_fails() {
 
 #[tokio::test]
 async fn update_helpers_are_noops_on_unknown_ids() {
-    // Match upstream: these never raise on missing rows. Pinning the
-    // contract so a future refactor can't silently flip to erroring.
     let db = test_db().await;
 
     db.increment_upload_started(1).await.unwrap();
@@ -318,8 +310,6 @@ async fn update_helpers_are_noops_on_unknown_ids() {
 
 #[tokio::test]
 async fn empty_string_coords_round_trip() {
-    // Schema is NOT NULL but allows empty strings. Upstream lets them
-    // through too; pin it so we don't accidentally add CHECK constraints.
     let db = test_db().await;
     let empty = CacheEntryCoord {
         key: "",
@@ -345,8 +335,6 @@ async fn empty_string_coords_round_trip() {
 
 #[tokio::test]
 async fn find_upload_by_coord_discriminates_each_column() {
-    // The WHERE clause must match all four columns. Flip each one in
-    // turn from a known-good setup and assert we miss.
     let db = test_db().await;
     let id = new_upload_id();
     let base = CacheEntryCoord {
@@ -364,7 +352,7 @@ async fn find_upload_by_coord_discriminates_each_column() {
     .await
     .unwrap();
 
-    for (label, coord) in [
+    for (label, c) in [
         ("wrong key", CacheEntryCoord { key: "X", ..base }),
         (
             "wrong version",
@@ -383,7 +371,7 @@ async fn find_upload_by_coord_discriminates_each_column() {
         ),
     ] {
         assert!(
-            db.find_upload_by_coord(coord).await.unwrap().is_none(),
+            db.find_upload_by_coord(c).await.unwrap().is_none(),
             "should miss on {label}"
         );
     }
@@ -393,37 +381,35 @@ async fn find_upload_by_coord_discriminates_each_column() {
 
 #[tokio::test]
 async fn deleting_old_storage_location_cascades_to_cache_entry() {
-    // Verifies that when the caller (finalize) deletes the previous
-    // storage_locations row, the now-orphaned cache_entries row would
-    // ALSO go away if it pointed at it — proves ON DELETE CASCADE is
-    // armed. In our upsert flow the entry is re-pointed at the new
-    // location *before* the old location is deleted, so CASCADE never
-    // actually fires in normal operation; this test pins the safety
-    // net.
     let db = test_db().await;
     let mut tx = db.begin().await.unwrap();
-    insert_storage_location_tx(&mut tx, "loc-doomed", "folder-doomed", 1)
+    tx.insert_storage_location("loc-doomed", "folder-doomed", 1)
         .await
         .unwrap();
     let entry_id = new_uuid();
-    sqlx::query(
-        "INSERT INTO cache_entries (id, key, version, scope, repoId, updatedAt, locationId) \
-         VALUES (?, 'k', 'v', 's', 'r', 0, 'loc-doomed')",
+    tx.seed_cache_entry(
+        &entry_id,
+        CacheEntryCoord {
+            key: "k",
+            version: "v",
+            scope: "s",
+            repo_id: "r",
+        },
+        0,
+        "loc-doomed",
     )
-    .bind(&entry_id)
-    .execute(&mut **tx.sqlite_tx().expect("SQLite test harness"))
     .await
     .unwrap();
     tx.commit().await.unwrap();
 
     sqlx::query("DELETE FROM storage_locations WHERE id = 'loc-doomed'")
-        .execute(db.sqlite_pool().expect("SQLite test harness"))
+        .execute(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
 
     let remaining: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM cache_entries WHERE id = ?")
         .bind(&entry_id)
-        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
+        .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_eq!(remaining.0, 0, "CASCADE should have removed the entry");

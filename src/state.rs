@@ -9,15 +9,20 @@ use std::sync::Arc;
 use crate::auth::JwksCache;
 use crate::config::AppConfig;
 use crate::db::Db;
+use crate::merge::MergeTracker;
 use crate::storage::StorageAdapter;
 
 /// Application state. Cloned cheaply — every field is itself `Arc`-ish.
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Db,
+    pub db: Arc<dyn Db>,
     pub storage: Arc<dyn StorageAdapter>,
     pub jwks: Arc<JwksCache>,
     pub config: Arc<AppConfig>,
+    /// Tracks in-flight lazy-merge tasks so graceful shutdown can
+    /// await them. Shared via `Clone` (internal `Arc`). `pub` because
+    /// `main.rs` clones it out to drain after `axum::serve` returns.
+    pub merges: MergeTracker,
 }
 
 impl AppState {
@@ -25,7 +30,7 @@ impl AppState {
     /// adapter wrapped for shared access, a JWKS cache, and a config.
     #[must_use]
     pub fn new(
-        db: Db,
+        db: Arc<dyn Db>,
         storage: Arc<dyn StorageAdapter>,
         jwks: Arc<JwksCache>,
         config: AppConfig,
@@ -35,6 +40,7 @@ impl AppState {
             storage,
             jwks,
             config: Arc::new(config),
+            merges: MergeTracker::new(),
         }
     }
 }

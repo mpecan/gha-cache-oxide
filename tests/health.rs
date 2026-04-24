@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode};
 use gha_cache_oxide::auth::AuthError;
 use gha_cache_oxide::auth::{JwkEntry, JwksCache, JwksFetcher};
 use gha_cache_oxide::config::{AppConfig, DbConfig, LogFormat, StorageConfig};
-use gha_cache_oxide::db::Db;
+use gha_cache_oxide::db::{Db, SqliteDb};
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::FilesystemAdapter;
 use tempfile::TempDir;
@@ -34,8 +34,9 @@ impl JwksFetcher for NullFetcher {
 /// outlives any test operation.
 async fn test_app() -> (axum::Router, TempDir) {
     let tmp = TempDir::new().unwrap();
-    let db = Db::connect_in_memory().await.unwrap();
+    let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
+    let db: Arc<dyn Db> = Arc::new(db);
     let storage = Arc::new(FilesystemAdapter::new(tmp.path()).unwrap());
     let jwks = Arc::new(JwksCache::new(Arc::new(NullFetcher)));
     let config = AppConfig {

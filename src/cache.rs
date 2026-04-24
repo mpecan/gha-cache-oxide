@@ -11,7 +11,6 @@
 use crate::db::Db;
 use crate::db::entities::{CacheEntryCoord, Upload};
 use crate::db::id::new_uuid;
-use crate::db::tx::{insert_storage_location_tx, upsert_cache_entry_tx};
 use crate::storage::{StorageAdapter, StorageError};
 
 /// Errors returned by [`complete_upload`].
@@ -71,7 +70,7 @@ pub(crate) struct CompleteUploadParams<'a> {
 /// Returns [`CompleteUploadError`]. See the variant docs for which
 /// branch each represents.
 pub(crate) async fn complete_upload(
-    db: &Db,
+    db: &dyn Db,
     adapter: &dyn StorageAdapter,
     params: CompleteUploadParams<'_>,
 ) -> Result<Upload, CompleteUploadError> {
@@ -102,7 +101,7 @@ pub(crate) async fn complete_upload(
     Ok(upload)
 }
 
-async fn validate_upload_counts(db: &Db, upload: &Upload) -> Result<(), CompleteUploadError> {
+async fn validate_upload_counts(db: &dyn Db, upload: &Upload) -> Result<(), CompleteUploadError> {
     if upload.finished_part_upload_count == 0 {
         db.delete_upload(upload.id).await?;
         return Err(CompleteUploadError::NoPartsUploaded);
@@ -118,7 +117,7 @@ async fn validate_upload_counts(db: &Db, upload: &Upload) -> Result<(), Complete
 }
 
 async fn validate_disk_parts(
-    db: &Db,
+    db: &dyn Db,
     adapter: &dyn StorageAdapter,
     upload: &Upload,
 ) -> Result<(), CompleteUploadError> {
@@ -138,31 +137,31 @@ async fn validate_disk_parts(
 /// `storage_location` (if any) so the caller can delete the
 /// corresponding blob folder post-commit.
 async fn commit_upload_tx(
-    db: &Db,
+    db: &dyn Db,
     upload: &Upload,
     params: &CompleteUploadParams<'_>,
 ) -> Result<Option<crate::db::entities::PreviousLocation>, CompleteUploadError> {
     let mut tx = db.begin().await?;
     let new_location_id = new_uuid();
-    insert_storage_location_tx(
-        &mut tx,
+    tx.insert_storage_location(
         &new_location_id,
         &upload.folder_name,
         upload.finished_part_upload_count,
     )
     .await?;
 
-    let previous =
-        upsert_cache_entry_tx(&mut tx, params.coord, &new_location_id, params.now_ms).await?;
+    let previous = tx
+        .upsert_cache_entry(params.coord, &new_location_id, params.now_ms)
+        .await?;
 
     if let Some(prev) = &previous {
         // The cache_entries row was already repointed at new_location_id
-        // by upsert_cache_entry_tx, so ON DELETE CASCADE won't fire when
-        // we drop the old storage_locations row.
-        crate::db::tx::delete_storage_location_tx(&mut tx, &prev.id).await?;
+        // by upsert_cache_entry, so ON DELETE CASCADE won't fire when we
+        // drop the old storage_locations row.
+        tx.delete_storage_location(&prev.id).await?;
     }
 
-    crate::db::tx::delete_upload_tx(&mut tx, upload.id).await?;
+    tx.delete_upload(upload.id).await?;
 
     tx.commit().await?;
     Ok(previous)
