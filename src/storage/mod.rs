@@ -1,8 +1,8 @@
 //! Object storage abstraction and drivers.
 //!
 //! The [`StorageAdapter`] trait abstracts over filesystem / S3 / GCS /
-//! Azure backends — all served by the `object_store` crate. M1 ships the
-//! filesystem variant only; S3 and GCS land in #12.
+//! Azure backends — all served by the `object_store` crate. Filesystem
+//! and S3 are wired up (#5, #12); GCS is deferred.
 //!
 //! # Dyn-compatibility
 //!
@@ -14,8 +14,10 @@
 //! negligible next to filesystem / network round-trips.
 
 mod filesystem;
+mod s3;
 
 pub use filesystem::FilesystemAdapter;
+pub use s3::{S3Adapter, S3Config};
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -34,6 +36,17 @@ pub enum StorageError {
 
     #[error("invalid object name {name:?}: {reason}")]
     InvalidObjectName { name: String, reason: &'static str },
+
+    /// S3 bucket is unreachable at startup — missing, wrong region, or
+    /// credential denied. Surfaced loudly during adapter construction so
+    /// operators see the bucket name, not a generic "S3 error" on the
+    /// first cache request.
+    #[error("s3 bucket {bucket:?} is unavailable: {source}")]
+    BucketUnavailable {
+        bucket: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[error("storage backend error: {0}")]
     Backend(#[from] object_store::Error),

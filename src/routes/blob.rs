@@ -283,7 +283,13 @@ fn storage_error_to_response(e: &StorageError) -> Response {
     match e {
         StorageError::ObjectNotFound(_) => not_found("Cache file not found"),
         StorageError::InvalidObjectName { .. } => bad_request(&e.to_string()),
-        StorageError::Backend(_) | StorageError::Io(_) => internal_error(&e.to_string()),
+        // BucketUnavailable fails at startup, not during request handling —
+        // but the match is exhaustive so we collapse it into the same 500
+        // bucket as other backend-level failures. If it ever reaches here
+        // the trace logged above identifies it.
+        StorageError::BucketUnavailable { .. } | StorageError::Backend(_) | StorageError::Io(_) => {
+            internal_error(&e.to_string())
+        }
     }
 }
 
