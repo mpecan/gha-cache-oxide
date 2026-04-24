@@ -46,7 +46,7 @@ use serde_json::json;
 
 use crate::auth::{CacheScope, ScopeEntry, require_github_token};
 use crate::cache::{CompleteUploadError, CompleteUploadParams, complete_upload};
-use crate::db::entities::{CacheEntryCoord, MatchRequest, NewUpload};
+use crate::db::entities::{CacheEntry, CacheEntryCoord, MatchRequest, NewUpload};
 use crate::db::id::{new_upload_id, now_ms};
 use crate::routes::errors::{bad_request, forbidden, internal_error, not_found};
 use crate::state::AppState;
@@ -230,21 +230,70 @@ async fn get_cache_entry_download_url(
     };
 
     match state.db.match_cache_entry(req).await {
-        Ok(Some(m)) => {
-            let url = format!(
-                "{}/download/{}",
-                trim_slash(state.config.api_base_url.as_str()),
-                m.entry.id
-            );
-            Json(DownloadOk {
+        Ok(Some(m)) => match resolve_download_url(&state, &m.entry).await {
+            Ok(url) => Json(DownloadOk {
                 ok: true,
                 signed_download_url: url,
                 matched_key: m.entry.key,
             })
-            .into_response()
-        }
+            .into_response(),
+            Err(e) => internal_error(&e.to_string()),
+        },
         Ok(None) => Json(OkFalse { ok: false }).into_response(),
         Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Picks the URL to return for a matched cache entry. Ports
+/// `lib/storage.ts:509-519`:
+///
+/// - Default URL is the server-proxied `/download/{entry_id}` that the
+///   blob route serves (and that the lazy-merge path (#15) still needs
+///   to mint the merged blob on the first download).
+/// - When `ENABLE_DIRECT_DOWNLOADS` is on AND the adapter can sign URLs
+///   AND the location's `mergedAt` is set, return a presigned URL so the
+///   client streams direct from the object store (10-minute TTL, set
+///   inside the adapter).
+/// - Every other combination falls back to the default server URL so
+///   the first-download / non-signing / flag-off paths all keep working.
+///
+/// Upstream's "purge missing storage" retry loop
+/// (`lib/storage.ts:501-507`) is deliberately not ported — see the
+/// module-level "Deviations from upstream" docstring.
+async fn resolve_download_url(state: &AppState, entry: &CacheEntry) -> Result<String, sqlx::Error> {
+    let default_url = format!(
+        "{}/download/{}",
+        trim_slash(state.config.api_base_url.as_str()),
+        entry.id
+    );
+    if !state.config.enable_direct_downloads {
+        return Ok(default_url);
+    }
+    // `cache_entries.locationId` is `NOT NULL` with `ON DELETE CASCADE`
+    // in both dialects (`migrations/*/0001_initial_schema.sql`), so a
+    // matched entry always has a location. This arm is defensive — a
+    // schema-invariant violation would be the only way to reach it.
+    let Some(location) = state.db.find_location_for_entry(&entry.id).await? else {
+        return Ok(default_url);
+    };
+    if location.merged_at.is_none() {
+        return Ok(default_url);
+    }
+    let merged_name = format!("{}/merged", location.folder_name);
+    match state.storage.signed_url(&merged_name).await {
+        Ok(Some(url)) => Ok(url.to_string()),
+        Ok(None) => Ok(default_url),
+        Err(e) => {
+            // Signing failures for an otherwise-valid location are
+            // observability-grade — fall back to the server URL so the
+            // client still gets a working download rather than a 500.
+            tracing::warn!(
+                error = %e,
+                location_id = %location.id,
+                "signed_url failed; falling back to server-proxied download URL",
+            );
+            Ok(default_url)
+        }
     }
 }
 
