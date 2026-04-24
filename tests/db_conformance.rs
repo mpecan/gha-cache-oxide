@@ -138,7 +138,7 @@ pub mod scenarios {
         let base = CacheEntryCoord {
             key: "K",
             version: "V",
-            scope: "S",
+            scope: "scn-upload-discrim",
             repo_id: "R",
         };
         db.create_upload(NewUpload {
@@ -472,22 +472,64 @@ pub mod scenarios {
         tx.rollback().await.unwrap();
     }
 
-    /// Committing the finalize transaction makes both writes visible
-    /// together — used to pin the happy-path atomicity counterpart to
-    /// the rollback scenario.
-    pub async fn finalize_transaction_commit_is_atomic(db: &Db) {
-        let coord = scoped_coord("scn-commit");
+    /// Mirrors the full `cache::complete_upload::commit_upload_tx`
+    /// shape in a single transaction: insert the NEW location, upsert
+    /// an existing coord (returns the PREVIOUS location), DELETE that
+    /// previous `storage_locations` row, DELETE the `uploads` row that
+    /// drove the finalize, then commit. Post-commit: only the new
+    /// location exists, the entry points at it, the upload is gone.
+    /// Without this scenario the `prev`-delete + `uploads`-delete steps
+    /// never land under the conformance suite.
+    pub async fn finalize_transaction_full_commit_shape(db: &Db) {
+        let coord = scoped_coord("scn-full-finalize");
 
-        let mut tx = db.begin().await.unwrap();
-        insert_storage_location_tx(&mut tx, "loc-commit", "folder-commit", 2)
+        // Seed an existing (old location + entry) and an in-flight upload.
+        let old_upload_id = new_upload_id();
+        db.create_upload(NewUpload {
+            id: old_upload_id,
+            coord,
+            folder_name: "folder-old",
+            created_at_ms: 500,
+        })
+        .await
+        .unwrap();
+        let mut setup = db.begin().await.unwrap();
+        insert_storage_location_tx(&mut setup, "loc-old-full", "folder-old", 1)
             .await
             .unwrap();
-        let previous = upsert_cache_entry_tx(&mut tx, coord, "loc-commit", 2_000)
+        upsert_cache_entry_tx(&mut setup, coord, "loc-old-full", 500)
+            .await
+            .unwrap();
+        setup.commit().await.unwrap();
+
+        // Finalize: insert new location, upsert (repoint entry), DELETE
+        // old location, DELETE upload — all in one tx.
+        let mut tx = db.begin().await.unwrap();
+        insert_storage_location_tx(&mut tx, "loc-new-full", "folder-new", 2)
+            .await
+            .unwrap();
+        let previous = upsert_cache_entry_tx(&mut tx, coord, "loc-new-full", 1_000)
+            .await
+            .unwrap()
+            .expect("existing coord → previous location returned");
+        assert_eq!(previous.id, "loc-old-full");
+        sqlx::query("DELETE FROM storage_locations WHERE id = ?")
+            .bind(&previous.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM uploads WHERE id = ?")
+            .bind(old_upload_id)
+            .execute(&mut *tx)
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        assert!(previous.is_none(), "fresh coord: no previous location");
 
+        // Post-commit assertions.
+        assert!(
+            db.find_upload_by_id(old_upload_id).await.unwrap().is_none(),
+            "uploads row must be gone"
+        );
         let m = db
             .match_cache_entry(MatchRequest {
                 primary_key: coord.key,
@@ -498,8 +540,8 @@ pub mod scenarios {
             })
             .await
             .unwrap()
-            .expect("commit must make the new entry matchable");
-        assert_eq!(m.match_type, MatchType::ExactPrimary);
+            .expect("entry must remain, repointed at the new location");
+        assert_eq!(m.entry.location_id, "loc-new-full");
     }
 
     /// Pins the `ON DELETE CASCADE` safety net on
@@ -564,7 +606,7 @@ pub async fn run_conformance_suite(db: &Db) {
     scenarios::match_cache_entry_first_scope_short_circuits_without_restore_keys(db).await;
     scenarios::match_cache_entry_first_scope_wins(db).await;
     scenarios::finalize_transaction_rollback_is_atomic(db).await;
-    scenarios::finalize_transaction_commit_is_atomic(db).await;
+    scenarios::finalize_transaction_full_commit_shape(db).await;
     scenarios::deleting_storage_location_cascades_to_cache_entry(db).await;
 }
 
@@ -621,7 +663,7 @@ db_conformance_cases!(
     match_cache_entry_first_scope_short_circuits_without_restore_keys,
     match_cache_entry_first_scope_wins,
     finalize_transaction_rollback_is_atomic,
-    finalize_transaction_commit_is_atomic,
+    finalize_transaction_full_commit_shape,
     deleting_storage_location_cascades_to_cache_entry,
 );
 
