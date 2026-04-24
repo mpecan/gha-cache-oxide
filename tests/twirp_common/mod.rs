@@ -25,12 +25,13 @@ use gha_cache_oxide::auth::{AuthError, JwkEntry, JwksCache, JwksFetcher};
 use gha_cache_oxide::config::{AppConfig, DbConfig, LogFormat, StorageConfig};
 use gha_cache_oxide::db::{Db, SqliteDb};
 use gha_cache_oxide::state::AppState;
-use gha_cache_oxide::storage::FilesystemAdapter;
+use gha_cache_oxide::storage::{ByteStream, FilesystemAdapter, StorageAdapter, StorageError};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use rsa::{RsaPrivateKey, RsaPublicKey, traits::PublicKeyParts};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use url::Url;
 
 pub const ISSUER: &str = "https://token.actions.githubusercontent.com";
 pub const BASE_PATH: &str = "/twirp/github.actions.results.api.v1.CacheService";
@@ -116,13 +117,30 @@ pub struct Harness {
     pub tmp: TempDir,
 }
 
+/// Options controlling `harness_with`. Defaulting here keeps the plain
+/// `harness()` call-site unchanged for the tests that don't care about
+/// these knobs.
+#[derive(Default)]
+pub struct HarnessOpts {
+    pub enable_direct_downloads: bool,
+    /// Override the storage adapter. `None` uses a plain
+    /// `FilesystemAdapter` rooted at the harness tmp dir — same as the
+    /// default `harness()`.
+    pub storage: Option<Arc<dyn StorageAdapter>>,
+}
+
 pub async fn harness() -> Harness {
+    harness_with(HarnessOpts::default()).await
+}
+
+pub async fn harness_with(opts: HarnessOpts) -> Harness {
     let tmp = TempDir::new().unwrap();
     let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
     let db: Arc<dyn Db> = Arc::new(db);
-    let storage: Arc<dyn gha_cache_oxide::storage::StorageAdapter> =
-        Arc::new(FilesystemAdapter::new(tmp.path()).unwrap());
+    let storage: Arc<dyn StorageAdapter> = opts
+        .storage
+        .unwrap_or_else(|| Arc::new(FilesystemAdapter::new(tmp.path()).unwrap()));
     let jwks = Arc::new(JwksCache::new(Arc::new(StaticFetcher)));
     let config = AppConfig {
         api_base_url: "http://localhost:3000".parse().unwrap(),
@@ -130,7 +148,7 @@ pub async fn harness() -> Harness {
         log_format: LogFormat::Text,
         cache_cleanup_older_than_days: 90,
         disable_cleanup_jobs: true,
-        enable_direct_downloads: false,
+        enable_direct_downloads: opts.enable_direct_downloads,
         skip_token_validation: true,
         management_api_key: None,
         storage: StorageConfig::Filesystem {
@@ -143,6 +161,48 @@ pub async fn harness() -> Harness {
     let state = AppState::new(db.clone(), storage, jwks, config);
     let router = gha_cache_oxide::build_app(state);
     Harness { router, db, tmp }
+}
+
+/// The fixed URL a `SigningFilesystem` shim hands back from `signed_url`.
+/// Deterministic so tests can assert on it exactly.
+pub const SIGNED_URL: &str = "https://presigned.test/download?sig=stub";
+
+/// Storage shim that delegates every operation to a
+/// `FilesystemAdapter` but returns a fixed presigned-looking URL from
+/// `signed_url`. Used by the direct-download tests to exercise the
+/// "signer + flag on" branches without standing up `MinIO`.
+pub struct SigningFilesystem {
+    inner: FilesystemAdapter,
+}
+
+impl SigningFilesystem {
+    pub fn new(root: &std::path::Path) -> Self {
+        Self {
+            inner: FilesystemAdapter::new(root).unwrap(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageAdapter for SigningFilesystem {
+    async fn upload_stream(&self, object_name: &str, body: ByteStream) -> Result<(), StorageError> {
+        self.inner.upload_stream(object_name, body).await
+    }
+    async fn download_stream(&self, object_name: &str) -> Result<ByteStream, StorageError> {
+        self.inner.download_stream(object_name).await
+    }
+    async fn delete_folder(&self, folder_name: &str) -> Result<(), StorageError> {
+        self.inner.delete_folder(folder_name).await
+    }
+    async fn count_files_in_folder(&self, folder_name: &str) -> Result<u64, StorageError> {
+        self.inner.count_files_in_folder(folder_name).await
+    }
+    async fn signed_url(&self, _object_name: &str) -> Result<Option<Url>, StorageError> {
+        Ok(Some(SIGNED_URL.parse().unwrap()))
+    }
+    async fn clear(&self) -> Result<(), StorageError> {
+        self.inner.clear().await
+    }
 }
 
 // --- Request / response helpers ----------------------------------------
