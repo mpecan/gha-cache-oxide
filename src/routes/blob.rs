@@ -24,6 +24,12 @@
 //!   here guarantees **exactly one** merger per location (issue #15
 //!   AC). The CAS loser falls back to streaming parts directly —
 //!   same branch upstream takes when `mergeStartedAt` is already set.
+//! - Terminal 404 when `partsDeletedAt` is set but `mergedAt` is not:
+//!   upstream would start a merge over missing parts; we surface it
+//!   as a terminal cache miss rather than risk a partial download.
+//!   Only reachable if an operator manually flipped the column, or if
+//!   `finalize_merge`'s rollback path ran incorrectly — a
+//!   schema-invariant violation either way.
 //! - Download responses set `Content-Type: application/octet-stream`
 //!   explicitly; upstream leaves the header to whatever h3's
 //!   `sendStream` emits by default. Being explicit matches what the

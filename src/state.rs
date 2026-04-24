@@ -20,7 +20,8 @@ pub struct AppState {
     pub jwks: Arc<JwksCache>,
     pub config: Arc<AppConfig>,
     /// Tracks in-flight lazy-merge tasks so graceful shutdown can
-    /// await them. Shared via `Clone` (internal `Arc`).
+    /// await them. Shared via `Clone` (internal `Arc`). `pub` because
+    /// `main.rs` clones it out to drain after `axum::serve` returns.
     pub merges: MergeTracker,
 }
 

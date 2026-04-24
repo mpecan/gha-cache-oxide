@@ -77,8 +77,10 @@ impl MergeTracker {
 
     /// Spawns `future` onto the tokio runtime and records it for
     /// shutdown tracking. Returns the spawned handle so callers can
-    /// still `.await` it if they want.
-    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    /// still `.await` it if they want. `pub(crate)` because spawn
+    /// sites are the request handlers — nothing outside the crate
+    /// should invent new lazy-merge tasks.
+    pub(crate) fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
@@ -88,30 +90,15 @@ impl MergeTracker {
 
     /// Closes the tracker (stops accepting new spawns) and awaits every
     /// task that was already in flight. Called by the server's
-    /// graceful-shutdown path.
+    /// graceful-shutdown path from `main.rs` — the one legitimate
+    /// external caller, which is why this method is `pub` while
+    /// `spawn` is `pub(crate)`.
     ///
     /// Safe to call once; a second call is a no-op because the tracker
     /// is already closed.
     pub async fn shutdown(&self) {
         self.inner.close();
         self.inner.wait().await;
-    }
-
-    /// Test-only: count of tasks still in flight. Useful for asserting
-    /// that a shutdown call actually drained something.
-    #[cfg(test)]
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// Test-only: `true` when no tasks are tracked. Paired with
-    /// [`len`](Self::len) so clippy's `len_without_is_empty` stays
-    /// quiet.
-    #[cfg(test)]
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
     }
 }
 
