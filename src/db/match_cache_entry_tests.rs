@@ -11,6 +11,7 @@
 use super::*;
 use crate::db::entities::{MatchRequest, MatchType};
 use crate::db::id::new_uuid;
+use crate::db::tx::insert_storage_location_tx;
 
 async fn test_db() -> Db {
     let db = Db::connect_in_memory().await.unwrap();
@@ -34,7 +35,7 @@ struct Seed<'a> {
 async fn seed_entry(db: &Db, s: Seed<'_>) -> String {
     let location_id = new_uuid();
     let entry_id = new_uuid();
-    let mut tx = db.pool().begin().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, &location_id, &format!("folder-{entry_id}"), 1)
         .await
         .unwrap();
@@ -49,7 +50,7 @@ async fn seed_entry(db: &Db, s: Seed<'_>) -> String {
     .bind(s.repo_id)
     .bind(s.updated_at_ms)
     .bind(&location_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx.sqlite_tx().expect("SQLite test harness"))
     .await
     .unwrap();
     tx.commit().await.unwrap();

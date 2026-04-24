@@ -76,21 +76,21 @@ async fn seed_upload(fx: &TestFixture, started: i64, finished: i64, parts_on_dis
 
 async fn count_uploads(db: &Db) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM uploads")
-        .fetch_one(db.pool())
+        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap()
 }
 
 async fn count_storage_locations(db: &Db) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM storage_locations")
-        .fetch_one(db.pool())
+        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap()
 }
 
 async fn count_cache_entries(db: &Db) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cache_entries")
-        .fetch_one(db.pool())
+        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap()
 }
@@ -218,7 +218,7 @@ async fn overwriting_existing_entry_deletes_previous_location_row() {
 
     // Seed an existing cache_entry + storage_location at the same coord
     // so the upsert takes the update path.
-    let mut tx = fx.db.pool().begin().await.unwrap();
+    let mut tx = fx.db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "old-loc", "old-folder", 1)
         .await
         .unwrap();
@@ -256,7 +256,7 @@ async fn overwriting_existing_entry_deletes_previous_location_row() {
     // The cache_entry row points at the NEW location, not old-loc.
     let loc_id: String = sqlx::query_scalar("SELECT locationId FROM cache_entries WHERE key = ?")
         .bind("build-cache")
-        .fetch_one(fx.db.pool())
+        .fetch_one(fx.db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_ne!(loc_id, "old-loc");
@@ -268,7 +268,7 @@ async fn overwriting_existing_entry_deletes_previous_folder_from_storage() {
 
     // Same setup as the previous test, but inspect the filesystem
     // afterwards. The old folder must be gone.
-    let mut tx = fx.db.pool().begin().await.unwrap();
+    let mut tx = fx.db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "old-loc", "old-folder", 1)
         .await
         .unwrap();

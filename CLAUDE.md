@@ -45,7 +45,7 @@ cargo test
 
 ### Database
 
-Schema migrations are at `migrations/sqlite/*.sql` and run automatically on server startup via `sqlx::migrate!`. Queries use runtime-checked `sqlx::query_as` — no offline-mode `.sqlx/` cache to keep in sync. Query correctness is enforced by the unit tests in `src/db/queries.rs` (each exercises its query against an in-memory SQLite). When adding a new query, add a test that runs it.
+Schema migrations are at `migrations/sqlite/*.sql` and `migrations/postgres/*.sql`; both run automatically on server startup via `sqlx::migrate!`, dispatched on the `Db` driver variant. Queries use runtime-checked `sqlx::query_as` — no offline-mode `.sqlx/` cache to keep in sync. Each `impl Db` method matches on the `Db::Sqlite` / `Db::Postgres` enum variant and runs the dialect-specific SQL (adjacent arms in `src/db/queries.rs`); transaction-level helpers in `src/db/tx.rs` take `&mut DbTx<'_>` and do the same. Query correctness is enforced by (a) the driver-agnostic conformance suite at `tests/db_conformance.rs` (runs against SQLite by default, against Postgres via `DATABASE_URL + --ignored`), and (b) SQLite-specific unit tests in `src/db/queries_tests.rs` + `src/db/match_cache_entry_tests.rs`. When adding a new query, add BOTH arms (SQLite + Postgres SQL literals) and a conformance-suite scenario that exercises it.
 
 ## Code Standards
 

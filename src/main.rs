@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use gha_cache_oxide::auth::{HttpJwksFetcher, JwksCache};
-use gha_cache_oxide::config::{AppConfig, DbConfig, StorageConfig};
+use gha_cache_oxide::config::{AppConfig, DbConfig, PostgresConfig, StorageConfig};
 use gha_cache_oxide::db::Db;
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::{FilesystemAdapter, S3Adapter, S3Config, StorageAdapter};
@@ -46,20 +46,48 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Creates a `Db` handle for the configured driver. Only `SQLite` is wired
-/// up in M1; other drivers exist in the config contract but produce an
-/// explicit startup error directing the operator to the sqlite driver.
+/// Creates a `Db` handle for the configured driver. `SQLite` and Postgres
+/// are wired up; `MySQL` is defined in the config contract but deferred.
 async fn connect_db(cfg: &DbConfig) -> anyhow::Result<Db> {
     match cfg {
         DbConfig::Sqlite { path } => Db::connect_sqlite(path)
             .await
             .with_context(|| format!("opening sqlite database at {}", path.display())),
-        DbConfig::Postgres(_) => anyhow::bail!(
-            "DB_DRIVER=postgres is not yet implemented in M1 (landing in #14); \
-             use DB_DRIVER=sqlite for now"
-        ),
+        DbConfig::Postgres(pg) => {
+            let url = postgres_url(pg);
+            Db::connect_postgres(&url)
+                .await
+                .context("connecting to postgres database")
+        }
         DbConfig::Mysql { .. } => {
-            anyhow::bail!("DB_DRIVER=mysql is not yet implemented; use DB_DRIVER=sqlite")
+            anyhow::bail!("DB_DRIVER=mysql is deferred; use DB_DRIVER=sqlite or DB_DRIVER=postgres")
+        }
+    }
+}
+
+/// Builds a libpq-style URL from the two-form Postgres config.
+/// [`PostgresConfig::Url`] is used verbatim (operators typically carry
+/// their own query parameters — `sslmode`, `connect_timeout`, etc.).
+/// [`PostgresConfig::Parts`] is assembled into `postgres://user:pw@host:port/db`.
+fn postgres_url(cfg: &PostgresConfig) -> String {
+    match cfg {
+        PostgresConfig::Url(url) => url.expose().to_string(),
+        PostgresConfig::Parts {
+            host,
+            port,
+            user,
+            password,
+            database,
+        } => {
+            // Percent-encode the password so special characters (`@`, `/`,
+            // `:`, `?`, `#`) don't rewrite the URL authority. The other
+            // fields are trusted to contain URL-safe characters (host,
+            // user, database normally come from config / compose files).
+            // `NON_ALPHANUMERIC` is a conservative set — matches what
+            // `std::process::Command` escaping reviewers expect to see.
+            use url::form_urlencoded::byte_serialize;
+            let pw: String = byte_serialize(password.expose().as_bytes()).collect();
+            format!("postgres://{user}:{pw}@{host}:{port}/{database}")
         }
     }
 }

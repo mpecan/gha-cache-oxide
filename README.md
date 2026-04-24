@@ -8,7 +8,7 @@ A Rust port of [**github-actions-cache-server**](https://github.com/falcondev-os
 
 - **Protocol** — GitHub Actions Cache v2 (Twirp RPCs + Azure-style block upload + plain download).
 - **Storage** — pluggable drivers: filesystem and S3-compatible today, GCS deferred.
-- **Metadata** — pluggable database: SQLite today, Postgres and MySQL coming.
+- **Metadata** — pluggable database: SQLite and Postgres today, MySQL deferred.
 - **Auth** — GitHub Actions OIDC JWT verification against the public JWKS.
 
 For the public HTTP contract with `actions/cache`, the upstream project is the specification; deviations are bugs.
@@ -31,9 +31,9 @@ Secrets (`AWS_SECRET_ACCESS_KEY`, `DB_POSTGRES_PASSWORD`, `DB_MYSQL_PASSWORD`, `
 
 ## Database
 
-SQLite is the only driver wired up today (M1). Postgres lands in #14, MySQL is deferred.
+SQLite and Postgres are wired up. MySQL is deferred.
 
-Schema migrations live under [`migrations/sqlite/`](./migrations/sqlite) and run automatically on startup. Column names match upstream's `lib/migrations.ts` verbatim (camelCase) so anyone debugging against an upstream-created DB sees the same shape.
+Schema migrations live under [`migrations/sqlite/`](./migrations/sqlite) and [`migrations/postgres/`](./migrations/postgres) and run automatically on startup. Column names match upstream's `lib/migrations.ts` verbatim (camelCase) — on Postgres the camelCase identifiers are double-quoted at write time so operators pointed at an upstream-populated database see the same shape.
 
 Queries use `sqlx` runtime-checked `query_as` rather than the `query!` / `query_as!` macros — deliberately avoiding an offline-mode cache (`.sqlx/`) that would need regeneration every time a query changes. Schema correctness is instead enforced by unit tests exercising each query against an in-memory SQLite. If you later want compile-time checking, install `sqlx-cli` (`cargo install sqlx-cli --no-default-features --features sqlite,rustls`) and enable offline mode per-query.
 
