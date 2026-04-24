@@ -8,7 +8,7 @@ mod twirp_common;
 
 use axum::http::StatusCode;
 use gha_cache_oxide::db::entities::CacheEntryCoord;
-use gha_cache_oxide::db::queries::{insert_storage_location_tx, upsert_cache_entry_tx};
+use gha_cache_oxide::db::tx::{insert_storage_location_tx, upsert_cache_entry_tx};
 use serde_json::json;
 use tower::ServiceExt;
 

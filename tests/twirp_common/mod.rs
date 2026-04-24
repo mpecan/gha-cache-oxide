@@ -173,14 +173,20 @@ pub async fn body_json(resp: axum::response::Response) -> (StatusCode, Value) {
 /// so the count itself doesn't mutate state.
 pub async fn count(db: &Db, sql: &str) -> i64 {
     let mut tx = db.begin().await.unwrap();
-    let n: i64 = sqlx::query_scalar(sql).fetch_one(&mut *tx).await.unwrap();
+    let n: i64 = sqlx::query_scalar(sql)
+        .fetch_one(&mut **tx.sqlite_tx().expect("SQLite test harness"))
+        .await
+        .unwrap();
     tx.rollback().await.unwrap();
     n
 }
 
 pub async fn fetch_string(db: &Db, sql: &str) -> String {
     let mut tx = db.begin().await.unwrap();
-    let s: String = sqlx::query_scalar(sql).fetch_one(&mut *tx).await.unwrap();
+    let s: String = sqlx::query_scalar(sql)
+        .fetch_one(&mut **tx.sqlite_tx().expect("SQLite test harness"))
+        .await
+        .unwrap();
     tx.rollback().await.unwrap();
     s
 }

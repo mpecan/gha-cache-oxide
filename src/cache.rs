@@ -11,7 +11,7 @@
 use crate::db::Db;
 use crate::db::entities::{CacheEntryCoord, Upload};
 use crate::db::id::new_uuid;
-use crate::db::queries::{insert_storage_location_tx, upsert_cache_entry_tx};
+use crate::db::tx::{insert_storage_location_tx, upsert_cache_entry_tx};
 use crate::storage::{StorageAdapter, StorageError};
 
 /// Errors returned by [`complete_upload`].
@@ -159,16 +159,10 @@ async fn commit_upload_tx(
         // The cache_entries row was already repointed at new_location_id
         // by upsert_cache_entry_tx, so ON DELETE CASCADE won't fire when
         // we drop the old storage_locations row.
-        sqlx::query("DELETE FROM storage_locations WHERE id = ?")
-            .bind(&prev.id)
-            .execute(&mut *tx)
-            .await?;
+        crate::db::tx::delete_storage_location_tx(&mut tx, &prev.id).await?;
     }
 
-    sqlx::query("DELETE FROM uploads WHERE id = ?")
-        .bind(upload.id)
-        .execute(&mut *tx)
-        .await?;
+    crate::db::tx::delete_upload_tx(&mut tx, upload.id).await?;
 
     tx.commit().await?;
     Ok(previous)

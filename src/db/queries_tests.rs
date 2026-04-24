@@ -6,6 +6,7 @@
 use super::*;
 use crate::db::entities::CacheEntryCoord;
 use crate::db::id::{new_upload_id, new_uuid};
+use crate::db::tx::{insert_storage_location_tx, upsert_cache_entry_tx};
 
 async fn test_db() -> Db {
     let db = Db::connect_in_memory().await.unwrap();
@@ -147,7 +148,7 @@ async fn delete_upload_removes_row() {
 #[tokio::test]
 async fn insert_storage_location_roundtrip() {
     let db = test_db().await;
-    let mut tx = db.pool().begin().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "loc-1", "folder-x", 7)
         .await
         .unwrap();
@@ -155,7 +156,7 @@ async fn insert_storage_location_roundtrip() {
 
     let loc: StorageLocation = sqlx::query_as("SELECT * FROM storage_locations WHERE id = ?")
         .bind("loc-1")
-        .fetch_one(db.pool())
+        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_eq!(loc.folder_name, "folder-x");
@@ -170,7 +171,7 @@ async fn insert_storage_location_roundtrip() {
 async fn find_location_for_entry_joins_correctly() {
     let db = test_db().await;
     // Seed a location and an entry pointing to it.
-    let mut tx = db.pool().begin().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "loc-A", "folder-A", 1)
         .await
         .unwrap();
@@ -185,7 +186,7 @@ async fn find_location_for_entry_joins_correctly() {
     .bind("r")
     .bind(1_700_000_000_000_i64)
     .bind("loc-A")
-    .execute(&mut *tx)
+    .execute(&mut **tx.sqlite_tx().expect("SQLite test harness"))
     .await
     .unwrap();
     tx.commit().await.unwrap();
@@ -205,7 +206,7 @@ async fn find_location_for_entry_joins_correctly() {
 #[tokio::test]
 async fn touch_location_downloaded_sets_timestamp() {
     let db = test_db().await;
-    let mut tx = db.pool().begin().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "loc-T", "folder-T", 1)
         .await
         .unwrap();
@@ -217,7 +218,7 @@ async fn touch_location_downloaded_sets_timestamp() {
 
     let loc: StorageLocation = sqlx::query_as("SELECT * FROM storage_locations WHERE id = ?")
         .bind("loc-T")
-        .fetch_one(db.pool())
+        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_eq!(loc.last_downloaded_at, Some(1_700_000_999_000));
@@ -226,7 +227,7 @@ async fn touch_location_downloaded_sets_timestamp() {
 #[tokio::test]
 async fn upsert_cache_entry_tx_insert_path_returns_none() {
     let db = test_db().await;
-    let mut tx = db.pool().begin().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "loc-new", "folder-new", 1)
         .await
         .unwrap();
@@ -237,7 +238,7 @@ async fn upsert_cache_entry_tx_insert_path_returns_none() {
 
     assert!(previous.is_none());
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM cache_entries")
-        .fetch_one(db.pool())
+        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_eq!(count.0, 1);
@@ -248,7 +249,7 @@ async fn upsert_cache_entry_tx_update_path_returns_previous_location() {
     let db = test_db().await;
 
     // First upsert → insert path.
-    let mut tx = db.pool().begin().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "loc-old", "folder-old", 1)
         .await
         .unwrap();
@@ -258,7 +259,7 @@ async fn upsert_cache_entry_tx_update_path_returns_previous_location() {
     tx.commit().await.unwrap();
 
     // Second upsert with same coord → update path.
-    let mut tx = db.pool().begin().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "loc-new", "folder-new", 2)
         .await
         .unwrap();
@@ -275,7 +276,7 @@ async fn upsert_cache_entry_tx_update_path_returns_previous_location() {
     let entries: Vec<(String, String, i64)> =
         sqlx::query_as("SELECT id, locationId, updatedAt FROM cache_entries WHERE key = ?")
             .bind("cache-key")
-            .fetch_all(db.pool())
+            .fetch_all(db.sqlite_pool().expect("SQLite test harness"))
             .await
             .unwrap();
     assert_eq!(entries.len(), 1);
@@ -400,7 +401,7 @@ async fn deleting_old_storage_location_cascades_to_cache_entry() {
     // actually fires in normal operation; this test pins the safety
     // net.
     let db = test_db().await;
-    let mut tx = db.pool().begin().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
     insert_storage_location_tx(&mut tx, "loc-doomed", "folder-doomed", 1)
         .await
         .unwrap();
@@ -410,19 +411,19 @@ async fn deleting_old_storage_location_cascades_to_cache_entry() {
          VALUES (?, 'k', 'v', 's', 'r', 0, 'loc-doomed')",
     )
     .bind(&entry_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx.sqlite_tx().expect("SQLite test harness"))
     .await
     .unwrap();
     tx.commit().await.unwrap();
 
     sqlx::query("DELETE FROM storage_locations WHERE id = 'loc-doomed'")
-        .execute(db.pool())
+        .execute(db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
 
     let remaining: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM cache_entries WHERE id = ?")
         .bind(&entry_id)
-        .fetch_one(db.pool())
+        .fetch_one(db.sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap();
     assert_eq!(remaining.0, 0, "CASCADE should have removed the entry");

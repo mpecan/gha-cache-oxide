@@ -272,7 +272,7 @@ async fn download_with_parts_deleted_but_not_merged_is_404() {
     )
     .bind(1_234_567_i64)
     .bind(&entry_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx.sqlite_tx().expect("SQLite test harness"))
     .await
     .unwrap();
     tx.commit().await.unwrap();
@@ -349,7 +349,7 @@ async fn download_touches_last_downloaded_at() {
              WHERE id = (SELECT locationId FROM cache_entries WHERE id = ?)",
         )
         .bind(&entry_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx.sqlite_tx().expect("SQLite test harness"))
         .await
         .unwrap();
         tx.rollback().await.unwrap();
