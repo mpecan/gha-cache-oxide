@@ -16,8 +16,8 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use twirp_common::{
-    BASE_PATH, Harness, HarnessOpts, SIGNED_URL, SigningFilesystem, body_json, fetch_string,
-    harness, harness_with, mint_token, post, write_token,
+    BASE_PATH, FailingSigner, Harness, HarnessOpts, SIGNED_URL, SigningFilesystem, body_json,
+    fetch_string, harness, harness_with, mint_token, post, write_token,
 };
 
 async fn seed_cache_entry(h: &Harness, key: &str, scope: &str, updated_at: i64) -> String {
@@ -331,6 +331,39 @@ async fn direct_downloads_signer_but_not_merged_returns_server_url() {
     let token = write_token();
     let (entry_id, _location_id) =
         seed_cache_entry_with_location(&h, "k", "refs/heads/main", 1_000).await;
+
+    let req = post(
+        &format!("{BASE_PATH}/GetCacheEntryDownloadURL"),
+        Some(&token),
+        &json!({"key":"k","version":"v1"}),
+    );
+    let resp = h.router.oneshot(req).await.unwrap();
+    let (status, body) = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["signed_download_url"],
+        json!(format!("http://localhost:3000/download/{entry_id}"))
+    );
+}
+
+#[tokio::test]
+async fn direct_downloads_signer_error_falls_back_to_server_url() {
+    // Transient signing failures must degrade gracefully to the server
+    // URL — clients still get a working download rather than a 500.
+    // Deliberate deviation from upstream (`lib/storage.ts` surfaces the
+    // throw as a 500); documented on `resolve_download_url`.
+    let root = TempDir::new().unwrap();
+    let storage: Arc<dyn StorageAdapter> = Arc::new(FailingSigner::new(root.path()));
+    let _ = Box::leak(Box::new(root));
+    let h = harness_with(HarnessOpts {
+        enable_direct_downloads: true,
+        storage: Some(storage),
+    })
+    .await;
+    let token = write_token();
+    let (entry_id, location_id) =
+        seed_cache_entry_with_location(&h, "k", "refs/heads/main", 1_000).await;
+    h.db.mark_merged(&location_id, 2_000).await.unwrap();
 
     let req = post(
         &format!("{BASE_PATH}/GetCacheEntryDownloadURL"),

@@ -269,6 +269,10 @@ async fn resolve_download_url(state: &AppState, entry: &CacheEntry) -> Result<St
     if !state.config.enable_direct_downloads {
         return Ok(default_url);
     }
+    // `cache_entries.locationId` is `NOT NULL` with `ON DELETE CASCADE`
+    // in both dialects (`migrations/*/0001_initial_schema.sql`), so a
+    // matched entry always has a location. This arm is defensive — a
+    // schema-invariant violation would be the only way to reach it.
     let Some(location) = state.db.find_location_for_entry(&entry.id).await? else {
         return Ok(default_url);
     };

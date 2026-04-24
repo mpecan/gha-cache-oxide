@@ -205,6 +205,43 @@ impl StorageAdapter for SigningFilesystem {
     }
 }
 
+/// Storage shim that claims to sign URLs but fails on every call.
+/// Models transient S3 signer errors so tests can pin the graceful
+/// fallback-to-server-URL path in `get_cache_entry_download_url`.
+pub struct FailingSigner {
+    inner: FilesystemAdapter,
+}
+
+impl FailingSigner {
+    pub fn new(root: &std::path::Path) -> Self {
+        Self {
+            inner: FilesystemAdapter::new(root).unwrap(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageAdapter for FailingSigner {
+    async fn upload_stream(&self, object_name: &str, body: ByteStream) -> Result<(), StorageError> {
+        self.inner.upload_stream(object_name, body).await
+    }
+    async fn download_stream(&self, object_name: &str) -> Result<ByteStream, StorageError> {
+        self.inner.download_stream(object_name).await
+    }
+    async fn delete_folder(&self, folder_name: &str) -> Result<(), StorageError> {
+        self.inner.delete_folder(folder_name).await
+    }
+    async fn count_files_in_folder(&self, folder_name: &str) -> Result<u64, StorageError> {
+        self.inner.count_files_in_folder(folder_name).await
+    }
+    async fn signed_url(&self, _object_name: &str) -> Result<Option<Url>, StorageError> {
+        Err(StorageError::Io(std::io::Error::other("signer offline")))
+    }
+    async fn clear(&self) -> Result<(), StorageError> {
+        self.inner.clear().await
+    }
+}
+
 // --- Request / response helpers ----------------------------------------
 
 pub fn post(path: &str, token: Option<&str>, body: &Value) -> Request<Body> {
