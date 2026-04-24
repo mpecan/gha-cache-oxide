@@ -7,7 +7,7 @@ A Rust port of [**github-actions-cache-server**](https://github.com/falcondev-os
 ## What this is
 
 - **Protocol** — GitHub Actions Cache v2 (Twirp RPCs + Azure-style block upload + plain download).
-- **Storage** — pluggable drivers: filesystem today, S3-compatible and GCS coming.
+- **Storage** — pluggable drivers: filesystem and S3-compatible today, GCS deferred.
 - **Metadata** — pluggable database: SQLite today, Postgres and MySQL coming.
 - **Auth** — GitHub Actions OIDC JWT verification against the public JWKS.
 

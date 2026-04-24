@@ -9,7 +9,7 @@ use gha_cache_oxide::auth::{HttpJwksFetcher, JwksCache};
 use gha_cache_oxide::config::{AppConfig, DbConfig, StorageConfig};
 use gha_cache_oxide::db::Db;
 use gha_cache_oxide::state::AppState;
-use gha_cache_oxide::storage::{FilesystemAdapter, StorageAdapter};
+use gha_cache_oxide::storage::{FilesystemAdapter, S3Adapter, S3Config, StorageAdapter};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     db.migrate().await.context("running database migrations")?;
     tracing::info!("database ready");
 
-    let storage = connect_storage(&config.storage)?;
+    let storage = connect_storage(&config.storage).await?;
     tracing::info!("storage ready");
 
     // JWKS cache is lazy: first incoming request triggers the initial
@@ -64,11 +64,10 @@ async fn connect_db(cfg: &DbConfig) -> anyhow::Result<Db> {
     }
 }
 
-/// Builds a storage adapter for the configured driver. Only filesystem is
-/// wired up in M1; S3 / GCS are defined in the config contract but not
-/// yet implemented — they surface an explicit startup error pointing at
-/// the issues that will land them.
-fn connect_storage(cfg: &StorageConfig) -> anyhow::Result<Arc<dyn StorageAdapter>> {
+/// Builds a storage adapter for the configured driver. Filesystem and
+/// S3 are wired up; GCS is defined in the config contract but not yet
+/// implemented — it surfaces an explicit startup error.
+async fn connect_storage(cfg: &StorageConfig) -> anyhow::Result<Arc<dyn StorageAdapter>> {
     match cfg {
         StorageConfig::Filesystem { path } => {
             let adapter = FilesystemAdapter::new(path).with_context(|| {
@@ -76,12 +75,29 @@ fn connect_storage(cfg: &StorageConfig) -> anyhow::Result<Arc<dyn StorageAdapter
             })?;
             Ok(Arc::new(adapter))
         }
-        StorageConfig::S3 { .. } => anyhow::bail!(
-            "STORAGE_DRIVER=s3 is not yet implemented in M1 (landing in #12); \
-             use STORAGE_DRIVER=filesystem for now"
-        ),
+        StorageConfig::S3 {
+            bucket,
+            region,
+            endpoint_url,
+            access_key_id,
+            secret_access_key,
+        } => {
+            let adapter = S3Adapter::new(S3Config {
+                bucket: bucket.clone(),
+                region: region.clone(),
+                endpoint_url: endpoint_url.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                // Production uses the upstream-compatible default —
+                // explicit `None` here documents the choice.
+                key_prefix: None,
+            })
+            .await
+            .with_context(|| format!("initialising s3 storage for bucket {bucket:?}"))?;
+            Ok(Arc::new(adapter))
+        }
         StorageConfig::Gcs { .. } => anyhow::bail!(
-            "STORAGE_DRIVER=gcs is not yet implemented; use STORAGE_DRIVER=filesystem"
+            "STORAGE_DRIVER=gcs is not yet implemented; use STORAGE_DRIVER=filesystem or s3"
         ),
     }
 }
