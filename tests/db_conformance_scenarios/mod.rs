@@ -10,7 +10,9 @@
 
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
+mod cleanup;
 mod recovery;
+pub use cleanup::*;
 pub use recovery::*;
 
 use gha_cache_oxide::db::Db;

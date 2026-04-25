@@ -204,9 +204,74 @@ pub trait Db: Send + Sync {
     /// the CAS and re-runs the merge; `mergedAt` (already NULL) is
     /// left alone so the schema invariant "both NULL ⇒ idle" holds.
     ///
+    /// Also called from the background `cleanup:merges` task (issue
+    /// #18) with a tighter 15-minute cutoff. The query body is
+    /// driver-specific but the contract is identical.
+    ///
     /// # Errors
     /// Returns `sqlx::Error` on update failure.
     async fn clear_stale_merge_claims(&self, cutoff_ms: i64) -> Result<u64, sqlx::Error>;
+
+    // ---- background cleanup finders (issue #18) ------------------------
+
+    /// Returns one page of `uploads` rows considered stale by the
+    /// background `cleanup:uploads` task. A row is stale when its
+    /// `createdAt` is strictly less than `cutoff_ms` AND
+    /// `lastPartUploadedAt` is either NULL or strictly less than
+    /// `cutoff_ms`. Mirrors upstream `tasks/cleanup/uploads.ts:23-34`.
+    ///
+    /// `limit` / `offset` paginate across the table; the caller loops
+    /// until a page returns fewer than `limit` rows.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_stale_uploads(
+        &self,
+        cutoff_ms: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Upload>, sqlx::Error>;
+
+    /// Returns one page of `storage_locations` rows whose
+    /// `lastDownloadedAt` is strictly less than `cutoff_ms`. NULL
+    /// `lastDownloadedAt` is **not** considered expired (matches
+    /// upstream `tasks/cleanup/cache-entries.ts:25` which uses the
+    /// SQL `<` operator with three-valued NULL semantics — never-
+    /// downloaded entries are never reaped by `cleanup:cache-entries`).
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_expired_locations(
+        &self,
+        cutoff_ms: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error>;
+
+    /// Returns one page of `storage_locations` rows that no
+    /// `cache_entries` row points at — i.e. orphan storage locations.
+    /// Mirrors upstream `tasks/cleanup/storage-locations.ts:22-36`.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_orphan_locations(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error>;
+
+    /// Returns one page of `storage_locations` rows where the lazy
+    /// merge has completed (`mergedAt IS NOT NULL`) but the per-part
+    /// folder hasn't yet been reaped (`partsDeletedAt IS NULL`).
+    /// Mirrors upstream `tasks/cleanup/parts.ts:21-28`.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_merged_with_parts(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error>;
 
     // ---- match_cache_entry (dialect-specific queries, default walk) ----
 
@@ -367,6 +432,29 @@ pub trait DbTx: Send {
     /// # Errors
     /// Returns `sqlx::Error` on delete failure.
     async fn delete_upload(&mut self, id: i64) -> Result<(), sqlx::Error>;
+
+    /// Deletes an `uploads` row only if the staleness predicate the
+    /// background `cleanup:uploads` task uses still holds at delete
+    /// time — `createdAt < cutoff_ms` AND
+    /// (`lastPartUploadedAt IS NULL` OR `lastPartUploadedAt < cutoff_ms`).
+    /// Returns `true` iff the row was actually deleted.
+    ///
+    /// Re-checking the predicate inside the transaction prevents a
+    /// race with `completeUpload`, which between the cleanup SELECT
+    /// and DELETE may have deleted the row and handed `folderName`
+    /// off to a fresh `storage_locations` row. Without the re-check,
+    /// the cleanup task would also wipe the parts the new
+    /// `cache_entries` row points at. Mirrors upstream
+    /// `tasks/cleanup/uploads.ts:45-57` (which exists for the same
+    /// reason — see the upstream comment).
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on delete failure.
+    async fn delete_upload_if_stale(
+        &mut self,
+        id: i64,
+        cutoff_ms: i64,
+    ) -> Result<bool, sqlx::Error>;
 
     /// Sets `partsDeletedAt` on a `storage_locations` row inside this
     /// transaction. The lazy-merge finisher calls this inside a

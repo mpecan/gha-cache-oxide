@@ -186,6 +186,11 @@ pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::clear_stale_merge_claims_clears_old_claims(db).await;
     scenarios::clear_stale_merge_claims_leaves_fresh_claims(db).await;
     scenarios::clear_stale_merge_claims_ignores_completed_and_idle_rows(db).await;
+    scenarios::find_stale_uploads_filters_on_both_predicates(db).await;
+    scenarios::delete_upload_if_stale_re_checks_predicate(db).await;
+    scenarios::find_expired_locations_respects_cutoff(db).await;
+    scenarios::find_orphan_locations_excludes_referenced_rows(db).await;
+    scenarios::find_merged_with_parts_filters_on_merge_and_parts_flags(db).await;
 }
 
 // ------------------------------------------------------------------------
@@ -249,6 +254,11 @@ db_conformance_cases!(
     clear_stale_merge_claims_clears_old_claims,
     clear_stale_merge_claims_leaves_fresh_claims,
     clear_stale_merge_claims_ignores_completed_and_idle_rows,
+    find_stale_uploads_filters_on_both_predicates,
+    delete_upload_if_stale_re_checks_predicate,
+    find_expired_locations_respects_cutoff,
+    find_orphan_locations_excludes_referenced_rows,
+    find_merged_with_parts_filters_on_merge_and_parts_flags,
 );
 
 db_conformance_cases!(
@@ -277,6 +287,11 @@ db_conformance_cases!(
     clear_stale_merge_claims_clears_old_claims,
     clear_stale_merge_claims_leaves_fresh_claims,
     clear_stale_merge_claims_ignores_completed_and_idle_rows,
+    find_stale_uploads_filters_on_both_predicates,
+    delete_upload_if_stale_re_checks_predicate,
+    find_expired_locations_respects_cutoff,
+    find_orphan_locations_excludes_referenced_rows,
+    find_merged_with_parts_filters_on_merge_and_parts_flags,
 );
 
 /// Smoke test for the programmatic runner — `SQLite` entry point always

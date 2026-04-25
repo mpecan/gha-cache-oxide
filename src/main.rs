@@ -11,7 +11,9 @@ use gha_cache_oxide::db::id::now_ms;
 use gha_cache_oxide::db::{Db, PostgresDb, SqliteDb};
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::{FilesystemAdapter, S3Adapter, S3Config, StorageAdapter};
+use gha_cache_oxide::tasks::cleanup;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,6 +34,19 @@ async fn main() -> anyhow::Result<()> {
 
     let storage = connect_storage(&config.storage).await?;
     tracing::info!("storage ready");
+
+    // Spawn the background cleanup scheduler (issue #18) before the
+    // server starts accepting connections. `maybe_spawn` consults
+    // `disable_cleanup_jobs` and logs the decision; cleanup runs
+    // hourly and is shut down via `cleanup_token` after axum drains.
+    let cleanup_token = CancellationToken::new();
+    let cleanup_handle = cleanup::maybe_spawn(
+        db.clone(),
+        storage.clone(),
+        config.cache_cleanup_older_than_days,
+        config.disable_cleanup_jobs,
+        cleanup_token.clone(),
+    );
 
     // JWKS cache is lazy: first incoming request triggers the initial
     // fetch. Doing it here avoids blocking startup on an external host.
@@ -65,6 +80,17 @@ async fn main() -> anyhow::Result<()> {
     // the merged blob.
     tracing::info!("awaiting in-flight lazy merges");
     merge_tracker.shutdown().await;
+
+    // Stop the cleanup scheduler. Cancellation lets the loop break at
+    // its next `tokio::select!` poll; an in-flight `run_all` finishes
+    // first so we don't leave a half-completed cleanup pass behind.
+    if let Some(handle) = cleanup_handle {
+        cleanup_token.cancel();
+        if let Err(e) = handle.await {
+            tracing::warn!(error = %e, "cleanup scheduler join failed");
+        }
+    }
+
     tracing::info!("shutdown complete");
     Ok(())
 }
