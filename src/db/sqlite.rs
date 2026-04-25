@@ -225,6 +225,85 @@ impl Db for SqliteDb {
         Ok(rows)
     }
 
+    async fn find_stale_uploads(
+        &self,
+        cutoff_ms: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Upload>, sqlx::Error> {
+        // ORDER BY id pins a stable page order across iterations so the
+        // `offset = failures-so-far` arithmetic in `tasks::cleanup::uploads`
+        // skips past the same row each time.
+        sqlx::query_as(
+            "SELECT * FROM uploads \
+             WHERE createdAt < ? \
+               AND (lastPartUploadedAt IS NULL OR lastPartUploadedAt < ?) \
+             ORDER BY id \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(cutoff_ms)
+        .bind(cutoff_ms)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn find_expired_locations(
+        &self,
+        cutoff_ms: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT * FROM storage_locations \
+             WHERE lastDownloadedAt < ? \
+             ORDER BY id \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(cutoff_ms)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn find_orphan_locations(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT sl.* FROM storage_locations sl \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 FROM cache_entries ce WHERE ce.locationId = sl.id \
+             ) \
+             ORDER BY sl.id \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn find_merged_with_parts(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT * FROM storage_locations \
+             WHERE mergedAt IS NOT NULL AND partsDeletedAt IS NULL \
+             ORDER BY id \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     async fn find_entry_by_exact_key(
         &self,
         key: &str,
@@ -363,6 +442,26 @@ impl DbTx for SqliteTx<'_> {
             .execute(&mut *self.tx)
             .await?;
         Ok(())
+    }
+
+    async fn delete_upload_if_stale(
+        &mut self,
+        id: i64,
+        cutoff_ms: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let rows = sqlx::query(
+            "DELETE FROM uploads \
+             WHERE id = ? \
+               AND createdAt < ? \
+               AND (lastPartUploadedAt IS NULL OR lastPartUploadedAt < ?)",
+        )
+        .bind(id)
+        .bind(cutoff_ms)
+        .bind(cutoff_ms)
+        .execute(&mut *self.tx)
+        .await?
+        .rows_affected();
+        Ok(rows == 1)
     }
 
     async fn mark_parts_deleted(
