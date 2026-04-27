@@ -42,11 +42,18 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
 proptest = "1"
 rsa = "0.9"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
+
+# Benchmark harness — see benches/protocol.rs and README §"Benchmarks"
+# (issue #21). `harness = false` lets criterion provide its own main.
+[[bench]]
+name = "protocol"
+harness = false
 
 [lints.clippy]
 unwrap_used = "deny"
