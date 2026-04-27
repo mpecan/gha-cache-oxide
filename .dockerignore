@@ -1,0 +1,30 @@
+# Build context exclusions for the Dockerfile (issue #20).
+# Mirrors the shape upstream's project uses; tuned for a Rust workspace.
+
+.git/
+.github/
+.idea/
+.vscode/
+.claude/
+.cargo/
+target/
+
+# Tests aren't compiled by `cargo build --bin gha-cache-oxide`, so we can
+# drop them from the build context and keep it tiny.
+tests/
+
+# Local dev data + the Docker artefacts themselves don't belong inside the image.
+data/
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Defence in depth — no .env file ships with the repo today, but excluding
+# them stops a stray local dotenv from being baked into a future image.
+.env
+.env.*
+
+# Repo prose; not needed at runtime.
+*.md
+LICENSE
+NOTICE

@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1.7
+#
+# Multi-stage build for gha-cache-oxide.
+#
+# Stage 1 — `rust:alpine` produces a fully-static binary against musl
+# libc, so the runtime stage can be a distroless/static image. The
+# `--mount=type=cache` directives keep the cargo registry and the
+# `target/` dir out of the image while reusing them across builds —
+# the binary is `cp`'d to /tmp before the layer ends so it survives
+# the cache mount.
+#
+# Stage 2 — `gcr.io/distroless/static-debian12:nonroot` is ~2 MiB,
+# has no shell, runs as the non-root UID 65532 by default, and matches
+# the issue #20 brief verbatim. No HEALTHCHECK directive: distroless
+# has no curl/wget/sh; the README's `curl /health` step is the
+# acceptance-criteria probe instead.
+
+# Pinned to match `rust-toolchain.toml` (1.93.0) and a published Alpine
+# tag. The exact `rust:1.93.0-alpine3.20` tag is on Docker Hub.
+ARG RUST_VERSION=1.93.0
+ARG ALPINE_VERSION=3.20
+
+FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
+
+# musl-dev is the toolchain — the `rust:alpine` image already targets
+# x86_64-unknown-linux-musl, but the C runtime headers aren't on the
+# image by default (sqlx uses none, but pulling musl-dev keeps the
+# build immune to future deps that bring in `cc`).
+RUN apk add --no-cache musl-dev
+
+WORKDIR /build
+
+# Manifests + source. `clippy.toml` is harmless (lint-only) but copying
+# it keeps the build context shape predictable. `.sqlx/` is not used by
+# this project — sqlx queries are runtime-checked via `query_as`.
+COPY Cargo.toml Cargo.lock clippy.toml ./
+COPY src ./src
+COPY migrations ./migrations
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --locked --bin gha-cache-oxide && \
+    cp target/release/gha-cache-oxide /tmp/gha-cache-oxide
+
+# Pre-seed the volume mount point so it inherits non-root ownership
+# when Docker creates the named volume on first run. Without this,
+# Docker creates `/var/lib/gha-cache` as `root:root 0755` and the
+# UID 65532 nonroot user gets `EACCES` on `create_dir_all` /
+# `cache.db` open. Distroless has no shell, so we can't `mkdir` in
+# the runtime stage — seed it here and `COPY --chown` it across.
+RUN mkdir -p /seed/gha-cache
+
+# ----------------------------------------------------------------------
+
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+COPY --from=builder /tmp/gha-cache-oxide /usr/local/bin/gha-cache-oxide
+# `nonroot` resolves to UID 65532 via the distroless image's
+# `/etc/passwd`. Numeric form would also work and is included as a
+# comment for operators who customise the base image.
+COPY --from=builder --chown=nonroot:nonroot /seed/gha-cache /var/lib/gha-cache
+
+# Default port; the binary itself reads PORT (and every other knob)
+# from the environment. Documented in `src/config/mod.rs`.
+ENV PORT=3000
+EXPOSE 3000
+
+USER nonroot
+
+ENTRYPOINT ["/usr/local/bin/gha-cache-oxide"]

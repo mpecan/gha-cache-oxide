@@ -13,6 +13,29 @@ A Rust port of [**github-actions-cache-server**](https://github.com/falcondev-os
 
 For the public HTTP contract with `actions/cache`, the upstream project is the specification; deviations are bugs.
 
+## Quickstart with Docker
+
+```sh
+git clone https://github.com/mpecan/gha-cache-oxide.git
+cd gha-cache-oxide
+docker compose up --build
+# in another terminal:
+curl -fsS http://localhost:3000/health
+# {"ok":true}
+```
+
+The compose stack runs the server with **filesystem storage + SQLite** on a
+named Docker volume (`cache-data`). `API_BASE_URL=http://localhost:3000` is
+pre-wired so cache clients see correct upload/download URLs out of the box.
+
+Stop with `docker compose down` — data persists across restarts. To wipe
+the cache state, `docker compose down -v` (removes the named volume).
+
+The image is built from a `rust:alpine` (musl) builder onto
+`gcr.io/distroless/static-debian12:nonroot`, so it ships as a fully-static
+binary on a ~2 MiB base. No shell, no package manager, runs as the
+non-root UID 65532.
+
 ## Configuration
 
 Configuration is driven entirely by environment variables — names match upstream's [`lib/schemas.ts`](https://github.com/falcondev-oss/github-actions-cache-server/blob/main/lib/schemas.ts) verbatim. The authoritative list lives in [`src/config/`](./src/config).
