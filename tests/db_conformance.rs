@@ -191,6 +191,9 @@ pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::find_expired_locations_respects_cutoff(db).await;
     scenarios::find_orphan_locations_excludes_referenced_rows(db).await;
     scenarios::find_merged_with_parts_filters_on_merge_and_parts_flags(db).await;
+    scenarios::list_cache_entries_no_filter_paginates(db).await;
+    scenarios::list_cache_entries_filters_by_scope_and_repo_id(db).await;
+    scenarios::list_storage_locations_paginates(db).await;
 }
 
 // ------------------------------------------------------------------------
@@ -259,6 +262,9 @@ db_conformance_cases!(
     find_expired_locations_respects_cutoff,
     find_orphan_locations_excludes_referenced_rows,
     find_merged_with_parts_filters_on_merge_and_parts_flags,
+    list_cache_entries_no_filter_paginates,
+    list_cache_entries_filters_by_scope_and_repo_id,
+    list_storage_locations_paginates,
 );
 
 db_conformance_cases!(
@@ -292,6 +298,9 @@ db_conformance_cases!(
     find_expired_locations_respects_cutoff,
     find_orphan_locations_excludes_referenced_rows,
     find_merged_with_parts_filters_on_merge_and_parts_flags,
+    list_cache_entries_no_filter_paginates,
+    list_cache_entries_filters_by_scope_and_repo_id,
+    list_storage_locations_paginates,
 );
 
 /// Smoke test for the programmatic runner — `SQLite` entry point always

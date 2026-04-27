@@ -2,37 +2,55 @@
 //!
 //! Column-name mapping uses `sqlx`'s `#[sqlx(rename = "...")]` attribute to
 //! keep SQL `camelCase` (matching upstream) while Rust stays `snake_case`.
+//!
+//! `CacheEntry` and `StorageLocation` derive `serde::Serialize` so the
+//! management API (issue #19) can emit them directly as JSON. The
+//! parallel `#[serde(rename = ...)]` annotations keep the wire shape
+//! identical to upstream's `cacheEntrySchema` / `storageLocationSchema`
+//! (camelCase keys), so an operator scripting against either server
+//! parses the same response shape.
+
+use serde::Serialize;
 
 /// One row in `cache_entries`.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct CacheEntry {
     pub id: String,
     pub key: String,
     pub version: String,
     pub scope: String,
     #[sqlx(rename = "repoId")]
+    #[serde(rename = "repoId")]
     pub repo_id: String,
     #[sqlx(rename = "updatedAt")]
+    #[serde(rename = "updatedAt")]
     pub updated_at: i64,
     #[sqlx(rename = "locationId")]
+    #[serde(rename = "locationId")]
     pub location_id: String,
 }
 
 /// One row in `storage_locations`.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct StorageLocation {
     pub id: String,
     #[sqlx(rename = "folderName")]
+    #[serde(rename = "folderName")]
     pub folder_name: String,
     #[sqlx(rename = "partCount")]
+    #[serde(rename = "partCount")]
     pub part_count: i64,
     #[sqlx(rename = "mergeStartedAt")]
+    #[serde(rename = "mergeStartedAt")]
     pub merge_started_at: Option<i64>,
     #[sqlx(rename = "mergedAt")]
+    #[serde(rename = "mergedAt")]
     pub merged_at: Option<i64>,
     #[sqlx(rename = "partsDeletedAt")]
+    #[serde(rename = "partsDeletedAt")]
     pub parts_deleted_at: Option<i64>,
     #[sqlx(rename = "lastDownloadedAt")]
+    #[serde(rename = "lastDownloadedAt")]
     pub last_downloaded_at: Option<i64>,
 }
 

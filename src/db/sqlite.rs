@@ -304,6 +304,69 @@ impl Db for SqliteDb {
         .await
     }
 
+    async fn list_cache_entries(
+        &self,
+        scope: Option<&str>,
+        repo_id: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<CacheEntry>, sqlx::Error> {
+        // The `(? IS NULL OR col = ?)` idiom keeps a single SQL string
+        // for all four filter combinations; each Option binds twice
+        // (SQLite has no `$N`-style positional reuse like Postgres).
+        sqlx::query_as(
+            "SELECT * FROM cache_entries \
+             WHERE (? IS NULL OR scope = ?) \
+               AND (? IS NULL OR repoId = ?) \
+             ORDER BY updatedAt DESC, id \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(scope)
+        .bind(scope)
+        .bind(repo_id)
+        .bind(repo_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn count_cache_entries(
+        &self,
+        scope: Option<&str>,
+        repo_id: Option<&str>,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cache_entries \
+             WHERE (? IS NULL OR scope = ?) \
+               AND (? IS NULL OR repoId = ?)",
+        )
+        .bind(scope)
+        .bind(scope)
+        .bind(repo_id)
+        .bind(repo_id)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    async fn list_storage_locations(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM storage_locations ORDER BY id LIMIT ? OFFSET ?")
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+    }
+
+    async fn count_storage_locations(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM storage_locations")
+            .fetch_one(&self.pool)
+            .await
+    }
+
     async fn find_entry_by_exact_key(
         &self,
         key: &str,

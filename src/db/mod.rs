@@ -273,6 +273,52 @@ pub trait Db: Send + Sync {
         offset: i64,
     ) -> Result<Vec<StorageLocation>, sqlx::Error>;
 
+    // ---- management API listings (issue #19) --------------------------
+
+    /// Returns one page of `cache_entries` rows, optionally filtered by
+    /// `scope` and/or `repo_id`. `None` filter values disable the
+    /// corresponding `WHERE` clause. Ordered by `updatedAt DESC, id`
+    /// for newest-first browsing with stable pagination.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn list_cache_entries(
+        &self,
+        scope: Option<&str>,
+        repo_id: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<CacheEntry>, sqlx::Error>;
+
+    /// Counts `cache_entries` rows matching the same optional filters
+    /// as [`list_cache_entries`](Self::list_cache_entries).
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn count_cache_entries(
+        &self,
+        scope: Option<&str>,
+        repo_id: Option<&str>,
+    ) -> Result<i64, sqlx::Error>;
+
+    /// Returns one page of `storage_locations` rows. Ordered by `id`
+    /// for stable pagination (locations have no useful "recency"
+    /// column — all timestamps are nullable).
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn list_storage_locations(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error>;
+
+    /// Counts every row in `storage_locations`.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn count_storage_locations(&self) -> Result<i64, sqlx::Error>;
+
     // ---- match_cache_entry (dialect-specific queries, default walk) ----
 
     /// Fetches the single most-recently-updated `cache_entries` row

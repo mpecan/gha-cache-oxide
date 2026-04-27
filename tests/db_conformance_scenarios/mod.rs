@@ -11,8 +11,10 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 mod cleanup;
+mod management;
 mod recovery;
 pub use cleanup::*;
+pub use management::*;
 pub use recovery::*;
 
 use gha_cache_oxide::db::Db;

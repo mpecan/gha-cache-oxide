@@ -11,3 +11,11 @@ Upstream copyright:
 
 See LICENSE for the full license text applicable to both the original
 work and this port.
+
+Documented deviations from upstream
+-----------------------------------
+
+The management API at /management/* is plain REST/JSON gated by an
+"Authorization: Bearer <KEY>" header, where upstream serves an oRPC
+surface at /management-api/* gated by an "x-api-key" header. Same
+underlying capability, smaller HTTP surface. See README.md.
