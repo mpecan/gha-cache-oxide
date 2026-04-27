@@ -1,0 +1,32 @@
+# `docker compose up` quickstart for gha-cache-oxide (issue #20).
+#
+# One service: filesystem storage + SQLite. The `cache-data` named volume
+# survives `docker compose down`; `down -v` wipes it. No secrets in this
+# file — see README §"Quickstart with Docker" for the threat model.
+
+services:
+  cache-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gha-cache-oxide:dev
+    ports:
+      - "3000:3000"
+    environment:
+      # The advertised base URL the server signs into upload/download URLs.
+      # Defaults to localhost so a developer can `curl` it directly.
+      API_BASE_URL: http://localhost:3000
+      # Filesystem storage rooted on the named volume below.
+      STORAGE_DRIVER: filesystem
+      STORAGE_FILESYSTEM_PATH: /var/lib/gha-cache/storage
+      # SQLite DB on the same volume — `data/cache.db` is created on
+      # first start and migrated automatically.
+      DB_DRIVER: sqlite
+      DB_SQLITE_PATH: /var/lib/gha-cache/cache.db
+      # Structured logs play nicely with `docker compose logs | jq`.
+      LOG_FORMAT: json
+    volumes:
+      - cache-data:/var/lib/gha-cache
+
+volumes:
+  cache-data:

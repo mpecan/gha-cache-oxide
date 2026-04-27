@@ -57,3 +57,14 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
+
+# Release profile is tuned for the distroless image size budget
+# (issue #20: ≤ 20 MB). LTO + strip + single codegen unit roughly
+# halves the binary vs. cargo defaults. `panic = "abort"` is
+# deliberately not set: the size win is small once `lto` is on, and
+# keeping unwinding leaves the door open for `#[should_panic]` tests
+# and the standard backtrace-on-panic operator UX.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
