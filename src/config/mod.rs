@@ -33,6 +33,10 @@ pub struct AppConfig {
     pub enable_direct_downloads: bool,
     pub skip_token_validation: bool,
     pub management_api_key: Option<Secret>,
+    /// Receiver URL the catch-all proxy forwards unmatched requests to.
+    /// Mirrors upstream `lib/schemas.ts:60-61` (issue #24). Default
+    /// `https://results-receiver.actions.githubusercontent.com`.
+    pub default_actions_results_url: Url,
     pub storage: StorageConfig,
     pub database: DbConfig,
 }
@@ -63,6 +67,10 @@ impl AppConfig {
             enable_direct_downloads: env::bool_or_default("ENABLE_DIRECT_DOWNLOADS", false)?,
             skip_token_validation: env::bool_or_default("SKIP_TOKEN_VALIDATION", false)?,
             management_api_key: env::optional_secret("MANAGEMENT_API_KEY"),
+            default_actions_results_url: env::url_with_default(
+                "DEFAULT_ACTIONS_RESULTS_URL",
+                "https://results-receiver.actions.githubusercontent.com",
+            )?,
             storage: StorageConfig::from_env()?,
             database: DbConfig::from_env()?,
         })
@@ -107,6 +115,7 @@ mod tests {
             ("ENABLE_DIRECT_DOWNLOADS", None),
             ("SKIP_TOKEN_VALIDATION", None),
             ("MANAGEMENT_API_KEY", None),
+            ("DEFAULT_ACTIONS_RESULTS_URL", None),
             ("STORAGE_DRIVER", Some("filesystem")),
             ("STORAGE_FILESYSTEM_PATH", Some("/tmp/gha")),
             ("DB_DRIVER", Some("sqlite")),
@@ -262,6 +271,51 @@ mod tests {
                 err,
                 ConfigError::InvalidBool {
                     var: "ENABLE_DIRECT_DOWNLOADS",
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn default_actions_results_url_defaults_to_upstream() {
+        with_env(&minimal_env(), || {
+            let cfg = AppConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.default_actions_results_url.as_str(),
+                "https://results-receiver.actions.githubusercontent.com/",
+                "must match upstream `lib/schemas.ts:60-61` default",
+            );
+        });
+    }
+
+    #[test]
+    fn default_actions_results_url_override_parses() {
+        let mut setup = minimal_env();
+        set(
+            &mut setup,
+            "DEFAULT_ACTIONS_RESULTS_URL",
+            Some("https://results-receiver.actions.xxxxxx.ghe.com"),
+        );
+        with_env(&setup, || {
+            let cfg = AppConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.default_actions_results_url.as_str(),
+                "https://results-receiver.actions.xxxxxx.ghe.com/",
+            );
+        });
+    }
+
+    #[test]
+    fn default_actions_results_url_rejects_non_url() {
+        let mut setup = minimal_env();
+        set(&mut setup, "DEFAULT_ACTIONS_RESULTS_URL", Some("not a url"));
+        with_env(&setup, || {
+            let err = AppConfig::from_env().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidUrl {
+                    var: "DEFAULT_ACTIONS_RESULTS_URL",
                     ..
                 }
             ));

@@ -151,6 +151,7 @@ pub async fn harness_with(opts: HarnessOpts) -> Harness {
         enable_direct_downloads: opts.enable_direct_downloads,
         skip_token_validation: true,
         management_api_key: None,
+        default_actions_results_url: "https://results-receiver.test/".parse().unwrap(),
         storage: StorageConfig::Filesystem {
             path: tmp.path().to_path_buf(),
         },

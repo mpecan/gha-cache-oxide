@@ -149,6 +149,7 @@ pub async fn spawn_server() -> ServerHandle {
         enable_direct_downloads: false,
         skip_token_validation: true,
         management_api_key: None,
+        default_actions_results_url: "https://results-receiver.test/".parse().unwrap(),
         storage: StorageConfig::Filesystem {
             path: tmp.path().to_path_buf(),
         },

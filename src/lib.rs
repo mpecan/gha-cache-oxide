@@ -79,6 +79,10 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/twirp/github.actions.results.api.v1.CacheService", twirp)
         .nest("/management", management)
         .merge(blob)
+        // Catch-all proxy to `DEFAULT_ACTIONS_RESULTS_URL` (issue #24,
+        // ports upstream `routes/[...path].ts`). Runs only for requests
+        // that don't match any explicit route above.
+        .fallback(routes::proxy::fallback)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
