@@ -29,6 +29,51 @@ Optional knobs with defaults: `PORT` (3000), `LOG_FORMAT` (`text`/`json`, defaul
 
 Secrets (`AWS_SECRET_ACCESS_KEY`, `DB_POSTGRES_PASSWORD`, `DB_MYSQL_PASSWORD`, `DB_POSTGRES_URL`, `MANAGEMENT_API_KEY`) are redacted in startup logs.
 
+## Management API
+
+A small REST/JSON surface is exposed under `/management` for operators
+who want to inspect or prune the cache without going through the
+GitHub Actions client. The whole sub-router is gated by
+`MANAGEMENT_API_KEY` (sent as `Authorization: Bearer <KEY>`).
+
+| Method | Path                             | Description                                                       |
+|--------|----------------------------------|-------------------------------------------------------------------|
+| `GET`  | `/management/cache-entries`      | Paginated list. Optional query params: `scope`, `repoId`, `page`, `itemsPerPage`. |
+| `DELETE` | `/management/cache-entries/{id}` | Deletes the entry, its storage location row, and the folder on the storage adapter. Returns 204. |
+| `GET`  | `/management/storage-locations`  | Paginated list. `page`, `itemsPerPage` query params (defaults 1 / 20, max 100). |
+| `POST` | `/management/cleanup/trigger`    | Runs one cleanup pass synchronously and returns the per-task counts as JSON. |
+
+Auth behaviour:
+
+- `MANAGEMENT_API_KEY` **unset** → every route returns `501 Not Implemented`
+  with `{"statusCode":501,"message":"Management API not enabled - set MANAGEMENT_API_KEY"}`.
+- Header missing / not a Bearer token → `401`.
+- Wrong key → `401`.
+
+### Deviation from upstream
+
+Upstream exposes the same surface via [oRPC](https://orpc.unnoq.com/) under
+`/management-api`, gated by the `x-api-key` header. This port deliberately
+diverges:
+
+1. Plain REST/JSON (no oRPC dependency, callable from `curl` / shell scripts).
+2. `Authorization: Bearer <KEY>` instead of `x-api-key` — the more conventional
+   token convention, requested in the original issue.
+3. `DELETE /management/cache-entries/{id}` returns **404** when the id does
+   not exist (upstream's Kysely `delete` is idempotent and silently returns
+   void). REST-idiomatic — operators see "you got the id wrong" rather than
+   a silent success.
+4. Narrower surface: the issue scoped this round to four routes. Upstream
+   additionally exposes `GET /cache-entries/{id}`, `GET /cache-entries/match`,
+   `DELETE /cache-entries` (filtered bulk delete), `GET /storage-locations/{id}`
+   and `DELETE /storage-locations/{id}`; and its `findMany` filter accepts
+   `key` / `version` in addition to `scope` / `repoId`. None of those are wired
+   here yet — open a follow-up issue if you need one.
+
+The wire shape of `cache_entries` / `storage_locations` rows themselves
+matches upstream verbatim (camelCase keys), so scripts that decode either
+server's responses see the same fields.
+
 ## Database
 
 SQLite and Postgres are wired up. MySQL is deferred.

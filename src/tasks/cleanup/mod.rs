@@ -29,6 +29,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -51,7 +52,11 @@ pub const PRODUCTION_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Per-task counts produced by a single [`run_all`] pass. Logged at
 /// `info` after every cycle so operators can see what was reaped.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialised as the JSON body of the `POST /management/cleanup/trigger`
+/// endpoint (issue #19), which is why the fields stay `pub` and the
+/// derive includes `Serialize`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CleanupReport {
     pub merges_reset: u64,
     pub uploads_deleted: u64,

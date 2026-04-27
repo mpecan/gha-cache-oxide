@@ -73,9 +73,11 @@ pub fn build_app(state: AppState) -> Router {
     // OIDC middleware: the `upload_id` / `cache_entry_id` in the URL is
     // the capability, matching upstream's routing topology.
     let blob = routes::blob::router();
+    let management = routes::management::router(state.clone());
     Router::new()
         .route("/health", get(routes::health::handler))
         .nest("/twirp/github.actions.results.api.v1.CacheService", twirp)
+        .nest("/management", management)
         .merge(blob)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

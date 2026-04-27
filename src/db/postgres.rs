@@ -295,6 +295,65 @@ impl Db for PostgresDb {
         .await
     }
 
+    async fn list_cache_entries(
+        &self,
+        scope: Option<&str>,
+        repo_id: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<CacheEntry>, sqlx::Error> {
+        // `$N::text IS NULL` makes the type explicit so Postgres can
+        // resolve the placeholder; the same parameter is referenced
+        // twice so each filter binds its `Option<&str>` exactly once.
+        sqlx::query_as(
+            "SELECT * FROM cache_entries \
+             WHERE ($1::text IS NULL OR scope = $1) \
+               AND ($2::text IS NULL OR \"repoId\" = $2) \
+             ORDER BY \"updatedAt\" DESC, id \
+             LIMIT $3 OFFSET $4",
+        )
+        .bind(scope)
+        .bind(repo_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn count_cache_entries(
+        &self,
+        scope: Option<&str>,
+        repo_id: Option<&str>,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cache_entries \
+             WHERE ($1::text IS NULL OR scope = $1) \
+               AND ($2::text IS NULL OR \"repoId\" = $2)",
+        )
+        .bind(scope)
+        .bind(repo_id)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    async fn list_storage_locations(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM storage_locations ORDER BY id LIMIT $1 OFFSET $2")
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+    }
+
+    async fn count_storage_locations(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM storage_locations")
+            .fetch_one(&self.pool)
+            .await
+    }
+
     async fn find_entry_by_exact_key(
         &self,
         key: &str,
