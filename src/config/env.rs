@@ -93,6 +93,14 @@ pub(super) fn u32_or_default(var: &'static str, default: u32) -> Result<u32, Con
     })
 }
 
+/// Reads a `usize` env var with a default. Empty/missing → `Ok(default)`;
+/// non-numeric → `Invalid`. Used for byte-count-shaped knobs.
+pub(super) fn usize_or_default(var: &'static str, default: usize) -> Result<usize, ConfigError> {
+    optional(var).map_or(Ok(default), |s| {
+        s.parse::<usize>().map_err(|e| invalid(var, s, &e))
+    })
+}
+
 fn invalid(var: &'static str, value: String, source: &ParseIntError) -> ConfigError {
     ConfigError::Invalid {
         var,
