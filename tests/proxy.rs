@@ -35,6 +35,10 @@ struct Harness {
 }
 
 async fn harness_with_upstream(upstream: &str) -> Harness {
+    harness_with_overrides(upstream, 16 * 1024 * 1024).await
+}
+
+async fn harness_with_overrides(upstream: &str, max_body: usize) -> Harness {
     let tmp = TempDir::new().unwrap();
     let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
@@ -51,6 +55,7 @@ async fn harness_with_upstream(upstream: &str) -> Harness {
         skip_token_validation: true,
         management_api_key: None,
         default_actions_results_url: upstream.parse().unwrap(),
+        proxy_max_request_body_bytes: max_body,
         storage: StorageConfig::Filesystem {
             path: tmp.path().to_path_buf(),
         },
@@ -307,11 +312,44 @@ async fn rejects_oversized_request_body() {
         .await;
 
     let h = harness_with_upstream(&mock.uri()).await;
-    // 16 MiB + 1 byte — one byte over the documented MAX_PROXY_REQUEST_BODY.
+    // 16 MiB + 1 byte — one byte over the default proxy_max_request_body_bytes.
     let oversized = vec![0u8; 16 * 1024 * 1024 + 1];
     let resp = h
         .router
         .oneshot(req(Method::POST, "/big", Body::from(oversized)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn body_cap_is_configurable() {
+    // Pin the AppConfig.proxy_max_request_body_bytes plumbing: a 1 KiB
+    // cap rejects a 1025-byte body but lets a 1024-byte body through.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/under-cap"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let h = harness_with_overrides(&mock.uri(), 1024).await;
+
+    // Just-at-cap: passes through to the upstream → 200.
+    let just_at_cap = vec![0u8; 1024];
+    let resp = h
+        .router
+        .clone()
+        .oneshot(req(Method::POST, "/under-cap", Body::from(just_at_cap)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // One-over-cap: 413, never reaches upstream.
+    let oversized = vec![0u8; 1025];
+    let resp = h
+        .router
+        .oneshot(req(Method::POST, "/under-cap", Body::from(oversized)))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);

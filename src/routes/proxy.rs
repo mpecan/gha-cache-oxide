@@ -18,63 +18,34 @@
 //! - Hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Authenticate`,
 //!   `Proxy-Authorization`, `Te`, `Trailers`, `Transfer-Encoding`,
 //!   `Upgrade`, `Host`) are stripped from both directions per RFC 7230 §6.1.
-//! - Request bodies above [`MAX_PROXY_REQUEST_BODY`] are rejected with
-//!   `413 Payload Too Large` — guards against accidental denial of
-//!   service through the proxy.
+//! - Request bodies above
+//!   [`AppConfig::proxy_max_request_body_bytes`](crate::config::AppConfig::proxy_max_request_body_bytes)
+//!   are rejected with `413 Payload Too Large` — guards against
+//!   accidental denial of service through the proxy.
 //! - Upstream responses are streamed straight back via
 //!   `axum::body::Body::from_stream` (reqwest `bytes_stream`).
 //! - Reqwest transport errors map to `502 Bad Gateway` and are logged.
-
-use std::sync::OnceLock;
+//!
+//! The reqwest client is the shared [`AppState::http_client`] so the
+//! connection pool / DNS cache is amortised across all outbound HTTP
+//! the server makes.
 
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::Response;
 use futures::TryStreamExt;
-use reqwest::Client;
 
 use crate::routes::errors::error_response;
 use crate::state::AppState;
 
-/// Upper bound on a proxied request body (16 MiB). The fallback exists
-/// for the small JSON RPCs `actions/cache` makes outside the cache
-/// protocol; cache uploads use the explicit blob routes and never
-/// reach this handler.
-pub const MAX_PROXY_REQUEST_BODY: usize = 16 * 1024 * 1024;
-
-/// Process-wide reqwest client for proxied requests. Reused across
-/// invocations so connection pools / DNS caches stick around.
-fn proxy_client() -> &'static Client {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        Client::builder()
-            // Don't auto-follow redirects — the catch-all reflects upstream's
-            // status verbatim, so a 302 should propagate to the client and
-            // not become a transparent GET against `Location`.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_else(|err| {
-                // Surface the underlying TLS / DNS / config failure once
-                // before degrading to defaults — the constitution forbids
-                // silent fallbacks. `Client::new()` itself can't fail in
-                // practice; if it ever did, reqwest would have already
-                // panicked.
-                tracing::error!(
-                    error = %err,
-                    "proxy: Client::builder() failed; falling back to Client::new() with library defaults",
-                );
-                Client::new()
-            })
-    })
-}
-
 pub async fn fallback(State(state): State<AppState>, req: Request<Body>) -> Response {
     let target_url = build_target_url(&state, &req);
+    let max_body = state.config.proxy_max_request_body_bytes;
 
     let (parts, body) = req.into_parts();
 
-    let Ok(body_bytes) = axum::body::to_bytes(body, MAX_PROXY_REQUEST_BODY).await else {
+    let Ok(body_bytes) = axum::body::to_bytes(body, max_body).await else {
         return error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
             "request body exceeds proxy size limit",
@@ -82,9 +53,10 @@ pub async fn fallback(State(state): State<AppState>, req: Request<Body>) -> Resp
     };
 
     // Pass `Bytes` straight through to reqwest — `body_bytes` already
-    // owns one cheap reference; copying to a `Vec<u8>` would double the
-    // peak allocation up to `MAX_PROXY_REQUEST_BODY` (16 MiB).
-    let mut request_builder = proxy_client()
+    // owns one cheap reference; copying to a `Vec<u8>` would double
+    // the peak allocation up to the configured cap.
+    let mut request_builder = state
+        .http_client
         .request(parts.method.clone(), &target_url)
         .body(body_bytes);
     for (name, value) in &parts.headers {

@@ -37,6 +37,14 @@ pub struct AppConfig {
     /// Mirrors upstream `lib/schemas.ts:60-61` (issue #24). Default
     /// `https://results-receiver.actions.githubusercontent.com`.
     pub default_actions_results_url: Url,
+    /// Upper bound on a request body forwarded through the catch-all
+    /// proxy fallback (`PROXY_MAX_REQUEST_BODY_BYTES`, default 16 MiB).
+    /// Oversized requests respond with `413 Payload Too Large`. Cache
+    /// uploads use the explicit blob routes and never reach the
+    /// fallback, so this only limits the small RPCs `actions/cache`
+    /// makes against the receiver. Per-port-only knob — no upstream
+    /// counterpart.
+    pub proxy_max_request_body_bytes: usize,
     pub storage: StorageConfig,
     pub database: DbConfig,
 }
@@ -70,6 +78,10 @@ impl AppConfig {
             default_actions_results_url: env::url_with_default(
                 "DEFAULT_ACTIONS_RESULTS_URL",
                 "https://results-receiver.actions.githubusercontent.com",
+            )?,
+            proxy_max_request_body_bytes: env::usize_or_default(
+                "PROXY_MAX_REQUEST_BODY_BYTES",
+                16 * 1024 * 1024,
             )?,
             storage: StorageConfig::from_env()?,
             database: DbConfig::from_env()?,
@@ -116,6 +128,7 @@ mod tests {
             ("SKIP_TOKEN_VALIDATION", None),
             ("MANAGEMENT_API_KEY", None),
             ("DEFAULT_ACTIONS_RESULTS_URL", None),
+            ("PROXY_MAX_REQUEST_BODY_BYTES", None),
             ("STORAGE_DRIVER", Some("filesystem")),
             ("STORAGE_FILESYSTEM_PATH", Some("/tmp/gha")),
             ("DB_DRIVER", Some("sqlite")),
@@ -316,6 +329,40 @@ mod tests {
                 err,
                 ConfigError::InvalidUrl {
                     var: "DEFAULT_ACTIONS_RESULTS_URL",
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn proxy_max_request_body_bytes_defaults_to_16_mib() {
+        with_env(&minimal_env(), || {
+            let cfg = AppConfig::from_env().unwrap();
+            assert_eq!(cfg.proxy_max_request_body_bytes, 16 * 1024 * 1024);
+        });
+    }
+
+    #[test]
+    fn proxy_max_request_body_bytes_override_parses() {
+        let mut setup = minimal_env();
+        set(&mut setup, "PROXY_MAX_REQUEST_BODY_BYTES", Some("4194304"));
+        with_env(&setup, || {
+            let cfg = AppConfig::from_env().unwrap();
+            assert_eq!(cfg.proxy_max_request_body_bytes, 4 * 1024 * 1024);
+        });
+    }
+
+    #[test]
+    fn proxy_max_request_body_bytes_rejects_non_numeric() {
+        let mut setup = minimal_env();
+        set(&mut setup, "PROXY_MAX_REQUEST_BODY_BYTES", Some("huge"));
+        with_env(&setup, || {
+            let err = AppConfig::from_env().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::Invalid {
+                    var: "PROXY_MAX_REQUEST_BODY_BYTES",
                     ..
                 }
             ));
