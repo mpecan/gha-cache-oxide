@@ -1,7 +1,12 @@
 # Issue #46 — the gate CLAUDE.md mandates pre-commit, lifted into Actions.
 # Four parallel jobs (fmt / clippy / doc / test). Toolchain version is read
 # from `rust-toolchain.toml` (1.93.0) by `actions-rust-lang/setup-rust-toolchain`.
-# `--ignored` integration suites (Postgres, MinIO) live in a follow-up — see #47.
+#
+# Issue #47 — two further jobs run the `#[ignore]`-gated conformance suites
+# against real backends (Postgres, MinIO). They sit alongside the core
+# four; failures don't cascade. `tests/upstream_diff.rs` is deliberately
+# NOT wired here — it requires the upstream Node server running with
+# SKIP_TOKEN_VALIDATION=true, which is out of scope for self-contained CI.
 
 name: CI
 
@@ -76,3 +81,101 @@ jobs:
       # future-proof when one lands.
       - run: cargo test --locked --all-targets
       - run: cargo test --locked --doc
+
+  # ---- Integration suites against real backends (issue #47) ------------
+  #
+  # Per-test-binary scoping is load-bearing: `cargo test -- --ignored`
+  # without `--test <name>` would also fire the *other* suite's tests,
+  # which `expect()` their own env vars and would panic. See
+  # `tests/db_conformance.rs:96` and `tests/storage_conformance.rs:77`.
+
+  integration-postgres:
+    name: cargo test --ignored (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Major-pinned; alpine variant keeps image small. Dependabot's
+        # `docker` ecosystem (issue #49) tracks this naturally.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+      - name: Postgres conformance
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: cargo test --locked --test db_conformance -- --ignored
+
+  integration-s3:
+    name: cargo test --ignored (s3 / minio)
+    runs-on: ubuntu-latest
+    # MinIO uses RELEASE.YYYY-MM-DDTHH-MM-SSZ tags exclusively (no major
+    # channel), so Dependabot can't track this scheme. **Bump policy:**
+    # manual review against MinIO release notes for breaking changes.
+    env:
+      MINIO_IMAGE: minio/minio:RELEASE.2025-09-07T16-13-09Z
+      MC_IMAGE: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+
+      # Sidecar via `docker run` (not `services:`) so we can attach a
+      # custom healthcheck. `services:` accepts `options:` but escaping
+      # MinIO's curl-based check inside a single line gets ugly fast.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            --health-cmd "curl -fsS http://localhost:9000/minio/health/live || exit 1" \
+            --health-interval 3s \
+            --health-timeout 3s \
+            --health-retries 20 \
+            "$MINIO_IMAGE" server /data
+
+      - name: Wait for MinIO healthy
+        run: |
+          for _ in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' minio 2>/dev/null || echo unknown)
+            case "$status" in
+              healthy) echo "minio healthy"; exit 0 ;;
+              unhealthy) docker logs minio; exit 1 ;;
+            esac
+            sleep 2
+          done
+          echo "minio failed to become healthy in 60s"
+          docker logs minio
+          exit 1
+
+      # `tests/storage_conformance.rs:99` reads `S3_TEST_BUCKET`
+      # (default `gha-cache-test`) and expects it to exist; tests don't
+      # create it. `mb -p` is idempotent.
+      - name: Create test bucket
+        run: |
+          docker run --rm --network host \
+            -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
+            "$MC_IMAGE" mb -p local/gha-cache-test
+
+      - name: S3 conformance + adapter
+        env:
+          S3_TEST_ENDPOINT: http://localhost:9000
+          S3_TEST_ACCESS_KEY: minioadmin
+          S3_TEST_SECRET_KEY: minioadmin
+        run: cargo test --locked --test s3_adapter --test storage_conformance -- --ignored
