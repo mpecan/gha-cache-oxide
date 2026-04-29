@@ -96,8 +96,14 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: mode=max
-          sbom: true
+          # Provenance + SBOM emit a multi-platform manifest *list*, even
+          # for single-platform builds (attestations are stored as
+          # platform-specific child manifests). The docker daemon's image
+          # store can't `load` a manifest list — only a flat image — so
+          # we skip both on PR runs (which use `load: true`). They aren't
+          # useful on PRs anyway since nothing is pushed.
+          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
 
       - name: Smoke test (amd64)
         # AC: smoke runs on PR + main. Tag pushes skip — same SHA was
