@@ -1,0 +1,138 @@
+# Issue #48 — build and publish the Dockerfile (#20) on every PR / main /
+# semver tag. Single job, parameterized by event:
+#
+#   pull_request → build amd64 only, `load: true`, no push, smoke test
+#                  the loaded image against `/health`. Catches Dockerfile
+#                  regressions before merge.
+#   push: main   → multi-arch (amd64 + arm64) push to GHCR as `:main` and
+#                  `:sha-<short>`, smoke test by pulling the digest back.
+#   push: v*.*.* → multi-arch push as `:vX.Y.Z`, `:X.Y`, `:latest`.
+#                  No smoke test (the same SHA was already smoke-tested
+#                  on its `main` run).
+#
+# `provenance: mode=max` + `sbom: true` on the build-push action attach
+# SLSA provenance and an SBOM to the published manifest, visible in
+# GHCR's UI.
+
+name: Docker
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read       # checkout
+  packages: write      # GHCR push (gated to non-PR events below)
+  id-token: write      # OIDC for build provenance
+  attestations: write  # build-push-action provenance/SBOM attachment
+
+# Force-pushing a fixup cancels the previous Docker build on the same ref.
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build${{ github.event_name == 'pull_request' && '' || ' + push' }}
+    runs-on: ubuntu-latest
+    # Cap multi-arch QEMU builds; prevents a stuck build from hogging
+    # a runner for the default 6-hour ceiling. Trim if cold builds
+    # consistently come in under 10 min.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 emulation only needed on push (multi-arch builds).
+      # PR builds are amd64-native — saves ~30s per PR run.
+      - if: github.event_name != 'pull_request'
+        uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/mpecan/gha-cache-oxide
+          # Tag policy:
+          #   PR        → :pr-<num>            (loaded locally for smoke)
+          #   main push → :main + :sha-<short>
+          #   tag push  → :vX.Y.Z + :X.Y + :latest + :sha-<short>
+          # `:latest` is gated to semver tag pushes; default `metadata-action`
+          # would auto-attach `:latest` to the default branch, which conflicts
+          # with the issue's AC.
+          tags: |
+            type=ref,event=pr
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          # `metadata-action` auto-emits OCI labels — `…source` (repo URL),
+          # `…revision` (SHA), `…version` (ref name). MIT licence isn't
+          # auto-inferred, so add it explicitly per AC #4.
+          labels: |
+            org.opencontainers.image.licenses=MIT
+
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          # PR runs are single-arch + load-into-local-daemon for smoke;
+          # push runs are multi-arch + push-to-GHCR.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Smoke test (amd64)
+        # AC: smoke runs on PR + main. Tag pushes skip — same SHA was
+        # already smoke-tested on its main run.
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+        run: |
+          # PR: image was loaded into local docker by `load: true` above
+          # under one of the meta tags (first line — the ref-pr or sha tag).
+          # Main push: image is in GHCR but not local; pull by digest. The
+          # runner is amd64, so `docker pull <digest>` resolves the amd64
+          # portion of the multi-arch index.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            IMAGE=$(printf '%s\n' '${{ steps.meta.outputs.tags }}' | head -n1)
+          else
+            IMAGE="ghcr.io/mpecan/gha-cache-oxide@${{ steps.build.outputs.digest }}"
+            docker pull "$IMAGE"
+          fi
+          # Mirror the docker-compose env so the smoke matches what
+          # operators run locally (filesystem + sqlite on a tmp volume).
+          docker run -d --name cache-server -p 3000:3000 \
+            -e API_BASE_URL=http://localhost:3000 \
+            -e STORAGE_DRIVER=filesystem \
+            -e STORAGE_FILESYSTEM_PATH=/var/lib/gha-cache/storage \
+            -e DB_DRIVER=sqlite \
+            -e DB_SQLITE_PATH=/var/lib/gha-cache/cache.db \
+            -e LOG_FORMAT=json \
+            "$IMAGE"
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/health >/dev/null 2>&1; then
+              echo "smoke test passed"
+              docker logs cache-server
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "smoke test FAILED — container did not report healthy in 30s"
+          docker logs cache-server
+          exit 1
