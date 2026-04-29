@@ -36,6 +36,10 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock clippy.toml ./
 COPY src ./src
 COPY migrations ./migrations
+# `[[bench]]` in Cargo.toml (#43) declares `benches/protocol.rs`. Cargo
+# parses every declared target during ANY build (even `--bin <name>`),
+# so the file must exist on disk or the manifest fails to parse.
+COPY benches ./benches
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
