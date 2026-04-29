@@ -163,3 +163,32 @@ async fn mark_parts_deleted_rollback_is_atomic() {
         "rollback must drop the partsDeletedAt update"
     );
 }
+
+#[tokio::test]
+async fn get_merge_state_covers_all_four_combinations() {
+    let db = test_db().await;
+    // (a) Non-existent location → None.
+    assert!(db.get_merge_state("missing").await.unwrap().is_none());
+
+    // (b) Fresh location → both columns NULL.
+    let mut tx = db.begin().await.unwrap();
+    tx.insert_storage_location("loc-ms", "folder-ms", 1)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let s = db.get_merge_state("loc-ms").await.unwrap().unwrap();
+    assert!(s.merge_started_at.is_none());
+    assert!(s.merged_at.is_none());
+
+    // (c) After CAS claim → mergeStartedAt set, mergedAt NULL.
+    assert!(db.try_mark_merge_started("loc-ms", 100).await.unwrap());
+    let s = db.get_merge_state("loc-ms").await.unwrap().unwrap();
+    assert_eq!(s.merge_started_at, Some(100));
+    assert!(s.merged_at.is_none());
+
+    // (d) After mark_merged → both set.
+    db.mark_merged("loc-ms", 200).await.unwrap();
+    let s = db.get_merge_state("loc-ms").await.unwrap().unwrap();
+    assert_eq!(s.merge_started_at, Some(100));
+    assert_eq!(s.merged_at, Some(200));
+}

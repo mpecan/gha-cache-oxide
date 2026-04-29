@@ -186,6 +186,7 @@ pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::clear_stale_merge_claims_clears_old_claims(db).await;
     scenarios::clear_stale_merge_claims_leaves_fresh_claims(db).await;
     scenarios::clear_stale_merge_claims_ignores_completed_and_idle_rows(db).await;
+    scenarios::get_merge_state_covers_all_four_combinations(db).await;
     scenarios::find_stale_uploads_filters_on_both_predicates(db).await;
     scenarios::delete_upload_if_stale_re_checks_predicate(db).await;
     scenarios::find_expired_locations_respects_cutoff(db).await;
@@ -257,6 +258,7 @@ db_conformance_cases!(
     clear_stale_merge_claims_clears_old_claims,
     clear_stale_merge_claims_leaves_fresh_claims,
     clear_stale_merge_claims_ignores_completed_and_idle_rows,
+    get_merge_state_covers_all_four_combinations,
     find_stale_uploads_filters_on_both_predicates,
     delete_upload_if_stale_re_checks_predicate,
     find_expired_locations_respects_cutoff,
@@ -293,6 +295,7 @@ db_conformance_cases!(
     clear_stale_merge_claims_clears_old_claims,
     clear_stale_merge_claims_leaves_fresh_claims,
     clear_stale_merge_claims_ignores_completed_and_idle_rows,
+    get_merge_state_covers_all_four_combinations,
     find_stale_uploads_filters_on_both_predicates,
     delete_upload_if_stale_re_checks_predicate,
     find_expired_locations_respects_cutoff,

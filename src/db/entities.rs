@@ -54,6 +54,19 @@ pub struct StorageLocation {
     pub last_downloaded_at: Option<i64>,
 }
 
+/// Snapshot of `(mergeStartedAt, mergedAt)` on a `storage_locations` row.
+///
+/// Used by the loser-wait path (issue #51) to poll for merge progress
+/// cheaply — narrower than [`StorageLocation`] and skips the
+/// `cache_entries` join.
+#[derive(Debug, Clone, Copy, sqlx::FromRow)]
+pub struct MergeState {
+    #[sqlx(rename = "mergeStartedAt")]
+    pub merge_started_at: Option<i64>,
+    #[sqlx(rename = "mergedAt")]
+    pub merged_at: Option<i64>,
+}
+
 /// One row in `uploads`.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Upload {
