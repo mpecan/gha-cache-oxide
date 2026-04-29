@@ -1,0 +1,67 @@
+# Issue #49 — keep dependency drift mechanical instead of manual.
+#
+# Three ecosystems run weekly. Each opens a single grouped PR for
+# minor + patch updates; majors land as individual PRs so they get
+# review (per AC #4 — no `major` in any group's `update-types`).
+#
+# Schema: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+
+version: 2
+
+updates:
+  # Rust dependencies. Cargo.lock is checked in, so resolution is
+  # deterministic and grouped PRs are diff-stable across runs.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # CI workflow action pins. Dependabot scans `.github/workflows/*.yml`
+  # for `uses:` references — `actions/checkout@v4`,
+  # `Swatinem/rust-cache@v2`, `actions-rust-lang/setup-rust-toolchain@v1`,
+  # `docker/*@v3..v6`, etc. (issues #46, #47, #48).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(ci)
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Dockerfile base images: `rust:${RUST_VERSION}-alpine${ALPINE_VERSION}`
+  # (Dependabot reads the `ARG` defaults — 1.93.0 + 3.20) plus the
+  # distroless runtime (`gcr.io/distroless/static-debian12:nonroot`).
+  #
+  # NOT covered by this ecosystem:
+  # - `services:` block images in `ci.yml` (`postgres:16-alpine`,
+  #   `minio/minio:RELEASE.*`) — Dependabot's docker scanner only reads
+  #   Dockerfiles and docker-compose, not workflow `services:`.
+  # - MinIO is also unfixable here regardless: its `RELEASE.YYYY-MM-...`
+  #   tag scheme is non-semver, so Dependabot can't compare versions.
+  #   Bump policy: manual review against MinIO release notes (documented
+  #   inline at the MinIO image tag in `.github/workflows/ci.yml`).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(ops)
+    groups:
+      docker-minor-patch:
+        update-types:
+          - minor
+          - patch
