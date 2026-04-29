@@ -42,7 +42,14 @@ async fn unauthenticated_request_is_401() {
 }
 
 #[tokio::test]
-async fn unknown_method_under_cache_service_is_404() {
+async fn unknown_method_under_cache_service_falls_through_to_proxy() {
+    // After issue #24, unhandled paths fall through to the
+    // `DEFAULT_ACTIONS_RESULTS_URL` catch-all proxy (matching upstream
+    // `routes/[...path].ts`). The harness configures
+    // `default_actions_results_url = https://results-receiver.test/`,
+    // a non-existent host, so the proxy reports 502 rather than the
+    // pre-#24 404. The assertion still proves axum routing did NOT
+    // accidentally match `/CreateCache` against `/CreateCacheEntry`.
     let h = harness().await;
     let token = write_token();
     let req = post(
@@ -51,7 +58,7 @@ async fn unknown_method_under_cache_service_is_404() {
         &json!({"key":"k","version":"v"}),
     );
     let resp = h.router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
 
 // --- CreateCacheEntry ---------------------------------------------------

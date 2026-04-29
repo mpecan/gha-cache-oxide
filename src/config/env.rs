@@ -51,6 +51,26 @@ pub(super) fn required_url(var: &'static str) -> Result<url::Url, ConfigError> {
     url::Url::parse(&raw).map_err(|source| ConfigError::InvalidUrl { var, source })
 }
 
+/// Reads a URL env var with a static default. Empty/missing → parse
+/// `default`. Malformed → [`ConfigError::InvalidUrl`].
+///
+/// `default` is taken `&'static str` because every call site has a
+/// schema literal — saves an allocation in the happy path.
+///
+/// # Panics
+/// Never. The default is parsed eagerly; callers that pass a malformed
+/// default would surface it as `InvalidUrl` from the parser. In
+/// practice the only call site (`DEFAULT_ACTIONS_RESULTS_URL`) is
+/// covered by a unit test.
+pub(super) fn url_with_default(
+    var: &'static str,
+    default: &'static str,
+) -> Result<url::Url, ConfigError> {
+    let raw = optional(var);
+    let s = raw.as_deref().unwrap_or(default);
+    url::Url::parse(s).map_err(|source| ConfigError::InvalidUrl { var, source })
+}
+
 /// Reads a boolean env var with a default. Only `"true"` / `"false"` parse;
 /// empty/missing → `Ok(default)`; anything else → `InvalidBool`.
 pub(super) fn bool_or_default(var: &'static str, default: bool) -> Result<bool, ConfigError> {
@@ -70,6 +90,14 @@ pub(super) fn bool_or_default(var: &'static str, default: bool) -> Result<bool, 
 pub(super) fn u32_or_default(var: &'static str, default: u32) -> Result<u32, ConfigError> {
     optional(var).map_or(Ok(default), |s| {
         s.parse::<u32>().map_err(|e| invalid(var, s, &e))
+    })
+}
+
+/// Reads a `usize` env var with a default. Empty/missing → `Ok(default)`;
+/// non-numeric → `Invalid`. Used for byte-count-shaped knobs.
+pub(super) fn usize_or_default(var: &'static str, default: usize) -> Result<usize, ConfigError> {
+    optional(var).map_or(Ok(default), |s| {
+        s.parse::<usize>().map_err(|e| invalid(var, s, &e))
     })
 }
 

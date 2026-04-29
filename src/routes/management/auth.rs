@@ -133,6 +133,8 @@ mod tests {
             enable_direct_downloads: false,
             skip_token_validation: true,
             management_api_key: key.map(|k| Secret::new(k.to_string())),
+            default_actions_results_url: "https://results-receiver.test/".parse().unwrap(),
+            proxy_max_request_body_bytes: 16 * 1024 * 1024,
             storage: StorageConfig::Filesystem {
                 path: tmp.path().to_path_buf(),
             },

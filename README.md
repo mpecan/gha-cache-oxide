@@ -48,7 +48,19 @@ Minimum required to boot:
 | `STORAGE_DRIVER` | `filesystem`, `s3`, `gcs` | Required. Each driver unlocks its own set of vars (e.g. `STORAGE_FILESYSTEM_PATH`, `STORAGE_S3_BUCKET`). |
 | `DB_DRIVER` | `sqlite`, `postgres`, `mysql` | Required. Each driver unlocks its own set of vars (e.g. `DB_SQLITE_PATH`, `DB_POSTGRES_URL`). |
 
-Optional knobs with defaults: `PORT` (3000), `LOG_FORMAT` (`text`/`json`, default `text`), `CACHE_CLEANUP_OLDER_THAN_DAYS` (90), `DISABLE_CLEANUP_JOBS`, `ENABLE_DIRECT_DOWNLOADS`, `SKIP_TOKEN_VALIDATION`, `MANAGEMENT_API_KEY`.
+Optional knobs with defaults: `PORT` (3000), `LOG_FORMAT` (`text`/`json`, default `text`), `CACHE_CLEANUP_OLDER_THAN_DAYS` (90), `DISABLE_CLEANUP_JOBS`, `ENABLE_DIRECT_DOWNLOADS`, `SKIP_TOKEN_VALIDATION`, `MANAGEMENT_API_KEY`, `DEFAULT_ACTIONS_RESULTS_URL` (default `https://results-receiver.actions.githubusercontent.com`), `PROXY_MAX_REQUEST_BODY_BYTES` (default 16 MiB = `16777216`).
+
+`DEFAULT_ACTIONS_RESULTS_URL` is the receiver the catch-all fallback
+proxy forwards unhandled paths to — `actions/cache` clients reach
+beyond the cache surface for artifact summaries / session telemetry,
+and matching upstream we forward those calls verbatim. Override it for
+GitHub Enterprise endpoints or air-gapped deployments.
+
+`PROXY_MAX_REQUEST_BODY_BYTES` caps the size of any single body the
+fallback proxy will forward. Cache uploads use the explicit blob
+routes and never reach the fallback, so this only limits the small
+RPCs `actions/cache` makes against the receiver. Operators on
+constrained networks can lower it; the default is generous (16 MiB).
 
 Secrets (`AWS_SECRET_ACCESS_KEY`, `DB_POSTGRES_PASSWORD`, `DB_MYSQL_PASSWORD`, `DB_POSTGRES_URL`, `MANAGEMENT_API_KEY`) are redacted in startup logs.
 
