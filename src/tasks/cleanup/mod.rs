@@ -1,7 +1,7 @@
 //! Background cleanup orchestration (issue #18).
 //!
-//! Houses the per-task modules ([`uploads`], [`merges`], [`parts`],
-//! [`entries`], [`locations`]) — each a port of an upstream
+//! Houses the per-task modules (`uploads`, `merges`, `parts`,
+//! `entries`, `locations`) — each a port of an upstream
 //! `tasks/cleanup/*.ts` file — plus the single hourly scheduler that
 //! drives them all in sequence.
 //!

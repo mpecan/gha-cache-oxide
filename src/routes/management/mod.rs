@@ -7,7 +7,7 @@
 //! - `GET    /storage-locations`  — paginated list
 //! - `POST   /cleanup/trigger`    — runs one full cleanup pass; returns the report body
 //!
-//! Every route is gated by [`auth::require_management_key`]:
+//! Every route is gated by the crate-internal `auth::require_management_key`:
 //! - `MANAGEMENT_API_KEY` env var unset → `501 Not Implemented`
 //! - Missing / malformed `Authorization: Bearer <key>` → `401 Unauthorized`
 //! - Wrong key → `401 Unauthorized`

@@ -1,0 +1,78 @@
+# Issue #46 — the gate CLAUDE.md mandates pre-commit, lifted into Actions.
+# Four parallel jobs (fmt / clippy / doc / test). Toolchain version is read
+# from `rust-toolchain.toml` (1.93.0) by `actions-rust-lang/setup-rust-toolchain`.
+# `--ignored` integration suites (Postgres, MinIO) live in a follow-up — see #47.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Force-pushing a fixup cancels the previous run on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default minimum; this workflow doesn't comment, label, or push.
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `setup-rust-toolchain` reads `rust-toolchain.toml` natively — single
+      # source of truth for the pinned 1.93.0 toolchain + rustfmt + clippy.
+      # `rustflags: ""` overrides the action's `-D warnings` default; we set
+      # it explicitly per job (clippy/doc) so the gate is never silent.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      # Caches `target/` + cargo registry, keyed on Cargo.lock + workflow.
+      # Subsequent runs log "Cache restored from key…" (AC #3).
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  doc:
+    name: cargo doc -D warnings
+    runs-on: ubuntu-latest
+    env:
+      # `RUSTDOCFLAGS` is the right knob for rustdoc lints; `RUSTFLAGS`
+      # would cause an unrelated full rebuild.
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --locked
+
+  test:
+    name: cargo test --locked
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+      # `--all-targets` covers benches/examples but skips doctests;
+      # `--doc` picks them up. Cheap today (zero runnable doctests),
+      # future-proof when one lands.
+      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --doc
