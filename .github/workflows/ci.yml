@@ -47,9 +47,15 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-      # Caches `target/` + cargo registry, keyed on Cargo.lock + workflow.
-      # Subsequent runs log "Cache restored from key…" (AC #3).
+      # Caches `target/` + cargo registry, keyed on Cargo.lock + toolchain.
+      # `shared-key` collapses the action's default per-job-name slot so
+      # all five compiling jobs reuse the same dep-build artifacts —
+      # critical for the integration jobs, which were cold-building from
+      # scratch (~170s) with default keying. Subsequent runs log
+      # "Cache restored from key…" (AC #3 from #46).
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
       - run: cargo clippy --all-targets --locked -- -D warnings
 
   doc:
@@ -65,6 +71,8 @@ jobs:
         with:
           rustflags: ""
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
       - run: cargo doc --no-deps --locked
 
   test:
@@ -76,6 +84,8 @@ jobs:
         with:
           rustflags: ""
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
       # `--all-targets` covers benches/examples but skips doctests;
       # `--doc` picks them up. Cheap today (zero runnable doctests),
       # future-proof when one lands.
@@ -114,6 +124,8 @@ jobs:
         with:
           rustflags: ""
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
       - name: Postgres conformance
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
@@ -134,6 +146,8 @@ jobs:
         with:
           rustflags: ""
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
 
       # Sidecar via `docker run` (not `services:`) so we can attach a
       # custom healthcheck. `services:` accepts `options:` but escaping
