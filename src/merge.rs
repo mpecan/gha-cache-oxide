@@ -322,5 +322,101 @@ enum FinalizeError {
     Storage(#[from] StorageError),
 }
 
+// ----------------------------------------------------------------------
+// Loser-wait path (issue #51).
+//
+// When a download arrives during another request's in-flight merge —
+// either via the handler-level `merge_started_at.is_some()` branch or
+// via `LazyMergeOutcome::LostRace` — the previous code lazy-fetched
+// `<folder>/parts/<i>` directly. That path raced with the winner's
+// `finalize_merge`, which deletes the parts folder once the merged
+// blob lands; on a slow runner the loser's next part fetch could
+// fail with `object not found` mid-stream.
+//
+// Fix: poll `mergedAt` at `POLL_INTERVAL_MS` and serve the merged blob
+// once it's set. Bounded by `WAIT_TIMEOUT_MS`; on timeout or merger
+// reset, return an error the caller maps to `503 Retry-After: 1`.
+//
+// Why option 2 (wait+poll) over option 1 (tee subscribe)? The issue
+// body claimed upstream uses tee — re-reading
+// `lib/storage.ts:301-306` shows that's wrong: upstream's loser path
+// also lazy-fetches parts and has the same race we did. We're
+// deliberately diverging from upstream behaviour to close it.
+// Option 1 in Rust would need either a `broadcast` channel
+// (capacity-per-consumer; lateness blows up) or full-byte buffering
+// for late joiners (unbounded memory). For a 2-concurrent edge case,
+// option 2's bounded extra latency (= merge duration + ~100 ms) is
+// the right complexity tradeoff.
+
+/// How often the loser-wait path re-reads the DB while the merger
+/// finishes. 100 ms is short enough to keep loser latency under a
+/// couple of poll intervals on top of the merge duration, long enough
+/// that 16 concurrent first-downloads on the same key don't hammer
+/// the DB.
+const POLL_INTERVAL_MS: u64 = 100;
+
+/// Total time the loser will wait for the merger to finalise before
+/// giving up. 60 s is generous — typical merges complete in seconds
+/// — and a stuck merger surfaces as a 503 the client retries.
+const WAIT_TIMEOUT_MS: u64 = 60_000;
+
+/// Errors the loser-wait path surfaces upward; the caller renders
+/// each to an HTTP response.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WaitMergeError {
+    /// The merger did not finalise within [`WAIT_TIMEOUT_MS`]. Caller
+    /// returns `503 Retry-After: 1` so the client retries; the next
+    /// request either sees `mergedAt` (now landed) or wins the CAS
+    /// itself.
+    #[error("merger did not finalise within {WAIT_TIMEOUT_MS}ms")]
+    Timeout,
+    /// The merger failed and reset both flags. Caller should return
+    /// `503 Retry-After: 1`; the retry will re-claim the CAS.
+    #[error("merger failed and reset its flags; caller should retry")]
+    Reset,
+    /// The `storage_locations` row went missing while we were polling
+    /// — extremely unusual; cleanup wouldn't delete an in-progress
+    /// merge. Caller renders 404.
+    #[error("storage_locations row vanished during wait")]
+    LocationGone,
+    #[error("db error: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+}
+
+/// Polls `get_merge_state` until either `mergedAt` lands (returns the
+/// merged-blob stream) or the merger resets / times out.
+///
+/// # Errors
+/// Any `WaitMergeError` variant; see the type's docs.
+pub(crate) async fn wait_for_merge_then_serve(
+    db: &dyn Db,
+    storage: &dyn StorageAdapter,
+    location_id: &str,
+    folder_name: &str,
+) -> Result<ByteStream, WaitMergeError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(WAIT_TIMEOUT_MS);
+    loop {
+        match db.get_merge_state(location_id).await? {
+            None => return Err(WaitMergeError::LocationGone),
+            Some(state) => match (state.merged_at, state.merge_started_at) {
+                (Some(_), _) => {
+                    let merged_name = format!("{folder_name}/merged");
+                    let stream = storage.download_stream(&merged_name).await?;
+                    return Ok(stream);
+                }
+                (None, None) => return Err(WaitMergeError::Reset),
+                (None, Some(_)) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(WaitMergeError::Timeout);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+                }
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
