@@ -16,10 +16,10 @@
 //! - auth, scope and not-found failures carry `message` (e.g.
 //!   `CreateCacheEntry.post.ts:27`, `FinalizeCacheEntryUpload.ts:30-32`)
 //!
-//! The port mirrors that split: [`bad_request_body`] emits
-//! `{statusCode, statusMessage}` for body-parse failures, while every
-//! other error path uses [`error_response`] which emits
-//! `{statusCode, message}`.
+//! The port mirrors that split: the module-private `bad_request_body`
+//! helper emits `{statusCode, statusMessage}` for body-parse failures,
+//! while every other error path uses the crate-internal `error_response`
+//! helper which emits `{statusCode, message}`.
 //!
 //! # Deviations from upstream
 //!

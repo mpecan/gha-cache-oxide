@@ -59,7 +59,7 @@ pub enum StorageError {
 ///
 /// Callers address objects by flat string paths (`"folder/file"`).
 /// Implementations MUST reject traversal attempts (`".."` segments,
-/// absolute paths) via [`validate_object_name`].
+/// absolute paths) via the crate-internal `validate_object_name` helper.
 #[async_trait::async_trait]
 pub trait StorageAdapter: Send + Sync {
     /// Streams `body` into the object at `object_name`. Overwrites on

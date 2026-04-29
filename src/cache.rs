@@ -2,7 +2,7 @@
 //!
 //! Handlers stay thin by delegating multi-step dances (tx bounds,
 //! cleanup on failure, ordering of DB vs blob mutations) here. First
-//! occupant is [`complete_upload`] — the validate-and-commit step that
+//! occupant is the crate-internal `complete_upload` — the validate-and-commit step that
 //! turns a finished upload into a durable cache entry. When a second
 //! such operation lands, revisit whether these should become methods on
 //! a dedicated `Cache` struct; for one function, free functions are
