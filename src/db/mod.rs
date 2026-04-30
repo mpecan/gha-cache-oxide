@@ -245,11 +245,25 @@ pub trait Db: Send + Sync {
     ) -> Result<Vec<Upload>, sqlx::Error>;
 
     /// Returns one page of `storage_locations` rows whose
-    /// `lastDownloadedAt` is strictly less than `cutoff_ms`. NULL
-    /// `lastDownloadedAt` is **not** considered expired (matches
-    /// upstream `tasks/cleanup/cache-entries.ts:25` which uses the
-    /// SQL `<` operator with three-valued NULL semantics — never-
-    /// downloaded entries are never reaped by `cleanup:cache-entries`).
+    /// `lastDownloadedAt` is strictly less than `cutoff_ms`.
+    ///
+    /// # NULL semantics (issue #75 audit)
+    ///
+    /// NULL `lastDownloadedAt` is **never** considered expired,
+    /// matching upstream `tasks/cleanup/cache-entries.ts:25` (Kysely's
+    /// `where('<', ...)` uses SQL three-valued logic — `NULL < cutoff`
+    /// is UNKNOWN, excluded by `WHERE`). Never-downloaded entries
+    /// therefore live forever in `storage_locations` until an
+    /// operator deletes them via the management API.
+    ///
+    /// **Considered alternative:** `lastDownloadedAt < ? OR
+    /// lastDownloadedAt IS NULL` would silently start reaping
+    /// never-downloaded entries. Rejected — parity with upstream
+    /// matters more than a "clean up the orphans" instinct, and
+    /// operators relying on the upstream "stays forever until
+    /// reviewed" contract would be surprised. Pinned by
+    /// `find_expired_locations_excludes_null_last_downloaded_at` in
+    /// `tests/db_conformance_scenarios/cleanup.rs`.
     ///
     /// # Errors
     /// Returns `sqlx::Error` on query failure.

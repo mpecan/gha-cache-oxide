@@ -302,6 +302,39 @@ pub async fn find_expired_locations_respects_cutoff(db: &dyn Db) {
     );
 }
 
+/// Pins the audit conclusion from issue #75: NULL `lastDownloadedAt`
+/// is **never** returned by `find_expired_locations`, regardless of
+/// how far past the cutoff the wall clock is. This matches upstream
+/// `tasks/cleanup/cache-entries.ts:25` (Kysely's `where('<', ...)`
+/// uses SQL three-valued logic — `NULL < cutoff` is UNKNOWN, excluded
+/// by `WHERE`). A future "fix" that adds `OR lastDownloadedAt IS NULL`
+/// would silently start reaping never-downloaded entries; pin the
+/// chosen behaviour with a dedicated test so a grep for "null
+/// lastDownloadedAt" lights up.
+pub async fn find_expired_locations_excludes_null_last_downloaded_at(db: &dyn Db) {
+    seed_location_with_entry(
+        db,
+        "loc-null-only",
+        "folder-null-only",
+        "entry-null-only",
+        "scn-null-only",
+    )
+    .await;
+    // Never call touch_location_downloaded — lastDownloadedAt stays NULL.
+
+    // Cutoff is `i64::MAX` so a "treat NULL as expired" rewrite would
+    // unambiguously return the row. We assert it's NOT returned, so
+    // the only way the test passes is the upstream-aligned `<`
+    // predicate (NULL excluded by SQL three-valued logic).
+    let expired = db.find_expired_locations(i64::MAX, 100, 0).await.unwrap();
+    let expired_ids: std::collections::HashSet<&str> =
+        expired.iter().map(|l| l.id.as_str()).collect();
+    assert!(
+        !expired_ids.contains("loc-null-only"),
+        "NULL lastDownloadedAt must NEVER be expired (issue #75 audit pin)"
+    );
+}
+
 /// `find_orphan_locations` returns only rows that no `cache_entries`
 /// row points at. Upstream `storage-locations.ts:22-36` uses the same
 /// `NOT EXISTS (SELECT 1 FROM cache_entries WHERE locationId = sl.id)`
