@@ -38,7 +38,7 @@ use url::Url;
 ///    request somewhere unrelated.
 #[tokio::test]
 #[ignore = "requires S3_TEST_ENDPOINT + a running S3 endpoint; `cargo test --test s3_adapter -- --ignored`"]
-async fn missing_bucket_produces_clear_error() {
+async fn s3_missing_bucket_produces_clear_error() {
     let endpoint = std::env::var("S3_TEST_ENDPOINT")
         .expect("S3_TEST_ENDPOINT must be set; start MinIO and re-run `cargo test -- --ignored`");
     let access_key =

@@ -187,9 +187,103 @@ jobs:
             -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
             "$MC_IMAGE" mb -p local/gha-cache-test
 
+      # The positional `s3` filter scopes the `storage_conformance`
+      # binary to s3-named tests (s3::*, runner_..._against_s3,
+      # s3_missing_bucket_produces_clear_error) so the gcs scenarios in
+      # the same binary don't fire here without `GCS_TEST_ENDPOINT` set.
+      # Same pattern in the integration-gcs job.
       - name: S3 conformance + adapter
         env:
           S3_TEST_ENDPOINT: http://localhost:9000
           S3_TEST_ACCESS_KEY: minioadmin
           S3_TEST_SECRET_KEY: minioadmin
-        run: cargo test --locked --test s3_adapter --test storage_conformance -- --ignored
+        run: cargo test --locked --test s3_adapter --test storage_conformance -- --ignored s3
+
+  integration-gcs:
+    name: cargo test --ignored (gcs / fake-gcs-server)
+    runs-on: ubuntu-latest
+    # `tustvold/fake-gcs-server` is the fork `object_store`'s own
+    # integration tests use — the upstream `fsouza/fake-gcs-server`
+    # doesn't implement the XML-API write path that `object_store::gcp`
+    # emits at `{base_url}/{bucket}/{object}`, so PUTs land on the JSON
+    # API handler and fail with `invalid uploadType`. Digest-pinned for
+    # reproducibility (only `latest` tag exists, last pushed 2023-10-27).
+    env:
+      FAKE_GCS_IMAGE: tustvold/fake-gcs-server@sha256:dcd3aeacc07c731f1336e90c2889be2af8626ae993ee1fe2c0ba042ebbeb5a04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
+
+      # `object_store`'s GCS client emits XML-API requests at
+      # `{base_url}/{bucket}/{object}`. fake-gcs-server's XML-API write
+      # path rejects OAuth-signed requests with a misleading
+      # `invalid uploadType` 400. The fix used by `object_store`'s own
+      # integration tests is the special service-account JSON form
+      # below: `gcs_base_url` + `disable_oauth: true` tells the client
+      # to skip OAuth and emit anonymous requests against the emulator
+      # base URL. Trade-off: signed-URL tests can't run because the
+      # signer needs a real private key — those scenarios are excluded
+      # from the GCS conformance run (see `tests/storage_conformance.rs`).
+      - name: Write emulator service account
+        run: |
+          cat > /tmp/sa.json <<'EOF'
+          {
+            "gcs_base_url": "http://localhost:4443",
+            "disable_oauth": true,
+            "client_email": "",
+            "private_key": "",
+            "private_key_id": ""
+          }
+          EOF
+
+      # Sidecar via `docker run` for the same custom-healthcheck reason
+      # as the MinIO job. `-backend memory` keeps the emulator state in
+      # RAM — same shape `object_store`'s own tests use. `-public-host`
+      # makes fake-gcs-server emit URLs the test runner can reach.
+      - name: Start fake-gcs-server
+        run: |
+          docker run -d --name fake-gcs \
+            -p 4443:4443 \
+            --health-cmd "wget -qO- http://localhost:4443/storage/v1/b 2>/dev/null || exit 1" \
+            --health-interval 3s \
+            --health-timeout 3s \
+            --health-retries 20 \
+            "$FAKE_GCS_IMAGE" -scheme http -public-host localhost:4443 -backend memory
+
+      - name: Wait for fake-gcs-server healthy
+        run: |
+          for _ in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' fake-gcs 2>/dev/null || echo unknown)
+            case "$status" in
+              healthy) echo "fake-gcs healthy"; exit 0 ;;
+              unhealthy) docker logs fake-gcs; exit 1 ;;
+            esac
+            sleep 2
+          done
+          echo "fake-gcs failed to become healthy in 60s"
+          docker logs fake-gcs
+          exit 1
+
+      # `tests/storage_conformance.rs::gcs_setup` reads `GCS_TEST_BUCKET`
+      # (default `gha-cache-test`) and expects it to exist; tests don't
+      # create it.
+      - name: Create test bucket
+        run: |
+          curl -fsS -X POST 'http://localhost:4443/storage/v1/b' \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"gha-cache-test"}'
+
+      - name: GCS conformance + adapter
+        env:
+          GCS_TEST_ENDPOINT: http://localhost:4443
+          GCS_TEST_BUCKET: gha-cache-test
+          GCS_TEST_SA_KEY: /tmp/sa.json
+        # `gcs` positional filter scopes the shared
+        # `storage_conformance` binary to gcs-named tests; same pattern
+        # the integration-s3 job uses for s3.
+        run: cargo test --locked --test gcs_adapter --test storage_conformance -- --ignored gcs

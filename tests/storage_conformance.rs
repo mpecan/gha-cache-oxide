@@ -38,13 +38,15 @@
     clippy::too_long_first_doc_paragraph
 )]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use gha_cache_oxide::config::Secret;
 use gha_cache_oxide::storage::{
-    ByteStream, FilesystemAdapter, S3Adapter, S3Config, StorageAdapter, StorageError,
+    ByteStream, FilesystemAdapter, GcsAdapter, GcsConfig, S3Adapter, S3Config, StorageAdapter,
+    StorageError,
 };
 use tempfile::TempDir;
 use url::Url;
@@ -114,6 +116,54 @@ async fn s3_setup() -> SetupResult {
         endpoint_url: Some(Url::parse(&endpoint).unwrap()),
         access_key_id: Some(access_key),
         secret_access_key: Some(Secret::new(secret_key)),
+        key_prefix: Some(key_prefix),
+    })
+    .await
+    .unwrap();
+
+    let arc: Arc<dyn StorageAdapter> = Arc::new(adapter);
+    (arc, Box::new(()), true)
+}
+
+/// GCS setup for the conformance suite. Reads connection details from
+/// env so the same adapter can run against `fake-gcs-server` in CI or a
+/// live GCS bucket in a parity sweep.
+///
+/// # Required env
+/// - `GCS_TEST_ENDPOINT` — URL of the GCS-compatible server
+///   (`http://localhost:4443` for `fake-gcs-server`).
+/// - `GCS_TEST_SA_KEY` — path to a service-account JSON file. Against
+///   fake-gcs-server, use `object_store`'s emulator-shaped form
+///   (`{"gcs_base_url": "...", "disable_oauth": true,
+///   "client_email": "", "private_key": ""}`) — required because
+///   fake-gcs-server rejects OAuth-signed XML-API uploads with a
+///   misleading `invalid uploadType` error. Against real GCS use a
+///   normal service-account key file.
+///
+/// # Optional env (with defaults)
+/// - `GCS_TEST_BUCKET` (default `gha-cache-test`) — must exist; tests
+///   `clear()` it before each scenario.
+///
+/// # Panics
+/// Panics (which fails the test) when `GCS_TEST_ENDPOINT` is absent — the
+/// tests that call this are `#[ignore]`'d so a default `cargo test`
+/// never reaches this path.
+async fn gcs_setup() -> SetupResult {
+    let endpoint = std::env::var("GCS_TEST_ENDPOINT").expect(
+        "GCS_TEST_ENDPOINT must be set; start fake-gcs-server and re-run `cargo test -- --ignored`",
+    );
+    let bucket = std::env::var("GCS_TEST_BUCKET").unwrap_or_else(|_| "gha-cache-test".to_string());
+    let sa_key = std::env::var("GCS_TEST_SA_KEY").ok().map(PathBuf::from);
+
+    // Each test gets its own top-level prefix inside the shared bucket
+    // so `cargo test` can run scenarios in parallel without them
+    // clobbering each other's uploads/deletes/clears.
+    let key_prefix = format!("test-{}", uuid::Uuid::new_v4());
+
+    let adapter = GcsAdapter::new(GcsConfig {
+        bucket,
+        service_account_key: sa_key,
+        endpoint: Some(Url::parse(&endpoint).unwrap()),
         key_prefix: Some(key_prefix),
     })
     .await
@@ -573,6 +623,43 @@ storage_conformance_cases!(
     rejects_empty_object_name,
 );
 
+// Two scenarios are intentionally omitted from the GCS driver,
+// matching `object_store`'s own integration-test pattern (see
+// `gcp/mod.rs:316-340` in object_store-0.13.2):
+//
+// - `signed_url_matches_capability`: we run against fake-gcs-server
+//   with the `disable_oauth: true` SA fixture (the only shape that
+//   makes XML-API uploads succeed), and that fixture has no private
+//   key — so `signed_url(...)` can't sign. Both the `s3` driver
+//   (MinIO) and unit tests in `src/storage/gcs.rs::tests` keep this
+//   surface covered.
+// - `round_trip_crosses_buffer_flush`: triggers `BufWriter`'s XML-API
+//   multipart upload (`POST ?uploads=`), which fake-gcs-server does
+//   not implement (https://github.com/fsouza/fake-gcs-server/issues/852).
+//   Single-shot PUT round-trips are still exercised by
+//   `round_trip_zero_bytes` and `round_trip_small_payload`. Multipart
+//   parity is verified against real GCS in a manual sweep.
+storage_conformance_cases!(
+    gcs,
+    gcs_setup,
+    ignore: "requires GCS_TEST_ENDPOINT + running fake-gcs-server; `cargo test -- --ignored`",
+    round_trip_zero_bytes,
+    round_trip_small_payload,
+    download_missing_returns_object_not_found,
+    upload_rejects_directory_traversal,
+    download_rejects_absolute_path,
+    count_files_in_missing_folder_returns_zero,
+    count_files_counts_uploaded_files,
+    delete_folder_removes_all_children,
+    delete_missing_folder_is_noop,
+    delete_folder_is_recursive,
+    clear_removes_everything,
+    upload_overwrites_existing_object,
+    prefix_matching_is_segment_aware,
+    signed_url_validates_object_name,
+    rejects_empty_object_name,
+);
+
 // ------------------------------------------------------------------------
 // Smoke tests for the programmatic runner — exercise the same scenarios
 // in sequence against both drivers. Filesystem always runs; S3 is
@@ -591,3 +678,9 @@ async fn runner_executes_full_suite_against_s3() {
     let (adapter, _guard, signs_urls) = s3_setup().await;
     run_conformance_suite(adapter, signs_urls).await;
 }
+
+// No `runner_executes_full_suite_against_gcs`: the programmatic runner
+// runs every scenario including `signed_url_matches_capability`, which
+// can't pass against a fake-gcs-server emulator running with
+// `disable_oauth: true` (no signing key). Per-scenario macro coverage
+// above already exercises every other contract.

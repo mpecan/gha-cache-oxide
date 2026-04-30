@@ -2,7 +2,7 @@
 //!
 //! The [`StorageAdapter`] trait abstracts over filesystem / S3 / GCS /
 //! Azure backends — all served by the `object_store` crate. Filesystem
-//! and S3 are wired up (#5, #12); GCS is deferred.
+//! (#5), S3 (#12), and GCS (#68) are wired up. Azure remains deferred.
 //!
 //! # Dyn-compatibility
 //!
@@ -14,9 +14,11 @@
 //! negligible next to filesystem / network round-trips.
 
 mod filesystem;
+mod gcs;
 mod s3;
 
 pub use filesystem::FilesystemAdapter;
+pub use gcs::{GcsAdapter, GcsConfig};
 pub use s3::{S3Adapter, S3Config};
 
 use bytes::Bytes;
@@ -37,11 +39,12 @@ pub enum StorageError {
     #[error("invalid object name {name:?}: {reason}")]
     InvalidObjectName { name: String, reason: &'static str },
 
-    /// S3 bucket is unreachable at startup — missing, wrong region, or
+    /// Bucket is unreachable at startup — missing, wrong region, or
     /// credential denied. Surfaced loudly during adapter construction so
-    /// operators see the bucket name, not a generic "S3 error" on the
-    /// first cache request.
-    #[error("s3 bucket {bucket:?} is unavailable: {source}")]
+    /// operators see the bucket name, not a generic backend error on the
+    /// first cache request. Used by the S3 and GCS adapters; the
+    /// filesystem adapter has no equivalent failure mode.
+    #[error("storage bucket {bucket:?} is unavailable: {source}")]
     BucketUnavailable {
         bucket: String,
         #[source]
