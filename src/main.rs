@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use gha_cache_oxide::auth::{HttpJwksFetcher, JwksCache};
-use gha_cache_oxide::config::{AppConfig, DbConfig, PostgresConfig, StorageConfig};
+use gha_cache_oxide::config::{AppConfig, DbConfig, MysqlConfig, PostgresConfig, StorageConfig};
 use gha_cache_oxide::db::id::now_ms;
-use gha_cache_oxide::db::{Db, PostgresDb, SqliteDb};
+use gha_cache_oxide::db::{Db, MysqlDb, PostgresDb, SqliteDb};
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::{
     FilesystemAdapter, GcsAdapter, GcsConfig, S3Adapter, S3Config, StorageAdapter,
@@ -124,8 +124,8 @@ async fn shutdown_signal() {
     }
 }
 
-/// Creates a `Db` handle for the configured driver. `SQLite` and Postgres
-/// are wired up; `MySQL` is defined in the config contract but deferred.
+/// Creates a `Db` handle for the configured driver. `SQLite`,
+/// `Postgres`, and `MySQL` are all wired up.
 async fn connect_db(cfg: &DbConfig) -> anyhow::Result<Arc<dyn Db>> {
     match cfg {
         DbConfig::Sqlite { path } => {
@@ -141,8 +141,12 @@ async fn connect_db(cfg: &DbConfig) -> anyhow::Result<Arc<dyn Db>> {
                 .context("connecting to postgres database")?;
             Ok(Arc::new(db))
         }
-        DbConfig::Mysql { .. } => {
-            anyhow::bail!("DB_DRIVER=mysql is deferred; use DB_DRIVER=sqlite or DB_DRIVER=postgres")
+        DbConfig::Mysql(my) => {
+            let url = mysql_url(my);
+            let db = MysqlDb::connect(&url)
+                .await
+                .context("connecting to mysql database")?;
+            Ok(Arc::new(db))
         }
     }
 }
@@ -170,6 +174,28 @@ fn postgres_url(cfg: &PostgresConfig) -> String {
             use url::form_urlencoded::byte_serialize;
             let pw: String = byte_serialize(password.expose().as_bytes()).collect();
             format!("postgres://{user}:{pw}@{host}:{port}/{database}")
+        }
+    }
+}
+
+/// Builds a `mysql://` URL from the two-form `MySQL` config — same shape
+/// as [`postgres_url`] with the protocol swapped. Operators using
+/// [`MysqlConfig::Url`] pass theirs verbatim so they can carry options
+/// (e.g. `?ssl-mode=REQUIRED`); the parts form percent-encodes the
+/// password to keep special characters from rewriting the URL.
+fn mysql_url(cfg: &MysqlConfig) -> String {
+    match cfg {
+        MysqlConfig::Url(url) => url.expose().to_string(),
+        MysqlConfig::Parts {
+            host,
+            port,
+            user,
+            password,
+            database,
+        } => {
+            use url::form_urlencoded::byte_serialize;
+            let pw: String = byte_serialize(password.expose().as_bytes()).collect();
+            format!("mysql://{user}:{pw}@{host}:{port}/{database}")
         }
     }
 }

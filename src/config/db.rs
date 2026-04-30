@@ -15,14 +15,8 @@ pub enum DbConfig {
     Sqlite { path: PathBuf },
     /// `PostgreSQL`: either a connection URL or the 5-tuple, never both.
     Postgres(PostgresConfig),
-    /// `MySQL`: all five fields required.
-    Mysql {
-        host: String,
-        port: u16,
-        user: String,
-        password: Secret,
-        database: String,
-    },
+    /// `MySQL`: either a connection URL or the 5-tuple, never both.
+    Mysql(MysqlConfig),
 }
 
 /// Two-form `PostgreSQL` connection config.
@@ -32,6 +26,25 @@ pub enum DbConfig {
 /// forms are present.
 #[derive(Debug, Clone)]
 pub enum PostgresConfig {
+    Url(Secret),
+    Parts {
+        host: String,
+        port: u16,
+        user: String,
+        password: Secret,
+        database: String,
+    },
+}
+
+/// Two-form `MySQL` connection config.
+///
+/// Same XOR shape as [`PostgresConfig`]: `DB_MYSQL_URL` **or** the
+/// 5-var tuple, never both. The URL form is a port-side extension;
+/// upstream only supports the 5-var shape. Operators preferring a
+/// single env var (`mysql://user:pw@host:3306/db`) get the same
+/// ergonomics they have for postgres.
+#[derive(Debug, Clone)]
+pub enum MysqlConfig {
     Url(Secret),
     Parts {
         host: String,
@@ -96,13 +109,31 @@ fn parse_postgres() -> Result<DbConfig, ConfigError> {
 }
 
 fn parse_mysql() -> Result<DbConfig, ConfigError> {
-    Ok(DbConfig::Mysql {
-        host: required("DB_MYSQL_HOST")?,
-        port: required_u16("DB_MYSQL_PORT")?,
-        user: required("DB_MYSQL_USER")?,
-        password: Secret::new(required("DB_MYSQL_PASSWORD")?),
-        database: required("DB_MYSQL_DATABASE")?,
-    })
+    let url = optional("DB_MYSQL_URL");
+    let parts_set = [
+        "DB_MYSQL_HOST",
+        "DB_MYSQL_PORT",
+        "DB_MYSQL_USER",
+        "DB_MYSQL_PASSWORD",
+        "DB_MYSQL_DATABASE",
+    ]
+    .iter()
+    .any(|v| optional(v).is_some());
+
+    match (url, parts_set) {
+        (Some(_), true) => Err(ConfigError::MysqlConflict),
+        (Some(u), false) => Ok(DbConfig::Mysql(MysqlConfig::Url(Secret::new(u)))),
+        (None, true) => Ok(DbConfig::Mysql(MysqlConfig::Parts {
+            host: required("DB_MYSQL_HOST")?,
+            port: required_u16("DB_MYSQL_PORT")?,
+            user: required("DB_MYSQL_USER")?,
+            password: Secret::new(required("DB_MYSQL_PASSWORD")?),
+            database: required("DB_MYSQL_DATABASE")?,
+        })),
+        (None, false) => Err(ConfigError::Missing {
+            var: "DB_MYSQL_URL",
+        }),
+    }
 }
 
 // required/optional/required_u16 imported from super::env
@@ -122,6 +153,7 @@ mod tests {
         "DB_POSTGRES_USER",
         "DB_POSTGRES_PASSWORD",
         "DB_POSTGRES_DATABASE",
+        "DB_MYSQL_URL",
         "DB_MYSQL_HOST",
         "DB_MYSQL_PORT",
         "DB_MYSQL_USER",
@@ -280,7 +312,21 @@ mod tests {
     }
 
     #[test]
-    fn mysql_requires_host() {
+    fn mysql_rejects_both_url_and_parts() {
+        let mut setup = clear_all();
+        set(&mut setup, "DB_DRIVER", Some("mysql"));
+        set(&mut setup, "DB_MYSQL_URL", Some("mysql://u:p@h/d"));
+        set(&mut setup, "DB_MYSQL_HOST", Some("h"));
+        with_env(&setup, || {
+            let err = DbConfig::from_env().unwrap_err();
+            assert!(matches!(err, ConfigError::MysqlConflict));
+        });
+    }
+
+    #[test]
+    fn mysql_with_neither_form_set_reports_url_missing() {
+        // Mirrors `parse_postgres`: when neither form is configured, the
+        // error names the URL variable since it's the simplest fix.
         let mut setup = clear_all();
         set(&mut setup, "DB_DRIVER", Some("mysql"));
         with_env(&setup, || {
@@ -288,17 +334,34 @@ mod tests {
             assert!(matches!(
                 err,
                 ConfigError::Missing {
-                    var: "DB_MYSQL_HOST"
+                    var: "DB_MYSQL_URL"
                 }
             ));
         });
     }
 
     #[test]
-    fn mysql_requires_all_fields() {
-        // Any missing var among host/port/user/password/database fails.
-        // We spot-check port specifically; other missing-var paths share the
-        // `required()` helper already covered by the storage tests.
+    fn mysql_url_happy_path() {
+        let mut setup = clear_all();
+        set(&mut setup, "DB_DRIVER", Some("mysql"));
+        set(
+            &mut setup,
+            "DB_MYSQL_URL",
+            Some("mysql://user:pass@db.example:3306/app"),
+        );
+        with_env(&setup, || {
+            let cfg = DbConfig::from_env().unwrap();
+            let DbConfig::Mysql(MysqlConfig::Url(secret)) = cfg else {
+                panic!("expected Mysql::Url variant");
+            };
+            assert_eq!(secret.expose(), "mysql://user:pass@db.example:3306/app");
+        });
+    }
+
+    #[test]
+    fn mysql_parts_rejects_partial() {
+        // Any single missing var among host/port/user/password/database
+        // surfaces the next-needed one.
         let mut setup = clear_all();
         set(&mut setup, "DB_DRIVER", Some("mysql"));
         set(&mut setup, "DB_MYSQL_HOST", Some("h"));
@@ -318,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn mysql_happy_path() {
+    fn mysql_parts_happy_path() {
         let mut setup = clear_all();
         set(&mut setup, "DB_DRIVER", Some("mysql"));
         set(&mut setup, "DB_MYSQL_HOST", Some("db.example"));
@@ -328,21 +391,42 @@ mod tests {
         set(&mut setup, "DB_MYSQL_DATABASE", Some("gha_cache"));
         with_env(&setup, || {
             let cfg = DbConfig::from_env().unwrap();
-            let DbConfig::Mysql {
+            let DbConfig::Mysql(MysqlConfig::Parts {
                 host,
                 port,
                 user,
                 password,
                 database,
-            } = cfg
+            }) = cfg
             else {
-                panic!("expected Mysql variant");
+                panic!("expected Mysql::Parts variant");
             };
             assert_eq!(host, "db.example");
             assert_eq!(port, 3306);
             assert_eq!(user, "cache");
             assert_eq!(password.expose(), "hunter2");
             assert_eq!(database, "gha_cache");
+        });
+    }
+
+    #[test]
+    fn mysql_invalid_port_rejected() {
+        let mut setup = clear_all();
+        set(&mut setup, "DB_DRIVER", Some("mysql"));
+        set(&mut setup, "DB_MYSQL_HOST", Some("h"));
+        set(&mut setup, "DB_MYSQL_PORT", Some("not-a-number"));
+        set(&mut setup, "DB_MYSQL_USER", Some("u"));
+        set(&mut setup, "DB_MYSQL_PASSWORD", Some("p"));
+        set(&mut setup, "DB_MYSQL_DATABASE", Some("d"));
+        with_env(&setup, || {
+            let err = DbConfig::from_env().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::Invalid {
+                    var: "DB_MYSQL_PORT",
+                    ..
+                }
+            ));
         });
     }
 }

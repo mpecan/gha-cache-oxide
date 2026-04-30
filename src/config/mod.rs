@@ -14,7 +14,7 @@ pub mod storage;
 #[cfg(test)]
 mod env_test;
 
-pub use db::{DbConfig, PostgresConfig};
+pub use db::{DbConfig, MysqlConfig, PostgresConfig};
 pub use error::ConfigError;
 pub use secret::Secret;
 pub use storage::StorageConfig;

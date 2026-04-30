@@ -43,7 +43,7 @@
 
 use std::sync::Arc;
 
-use gha_cache_oxide::db::{Db, PostgresDb, SqliteDb};
+use gha_cache_oxide::db::{Db, MysqlDb, PostgresDb, SqliteDb};
 
 // ------------------------------------------------------------------------
 // Setup plumbing
@@ -145,6 +145,115 @@ async fn postgres_setup() -> SetupResult {
             url: base_url,
             schema,
         }),
+    )
+}
+
+/// `MySQL` setup for the conformance suite. Reads `DATABASE_URL` and
+/// stamps out a per-test database (`test_<uuid>`) so parallel scenarios
+/// sharing one bootstrapped server don't clobber each other's tables.
+/// `MySQL` has no per-pool `search_path` like Postgres; we instead create
+/// a dedicated database, reconnect to it, and `DROP DATABASE` on guard
+/// drop.
+///
+/// # Required env
+/// - `DATABASE_URL` — `MySQL` URL, e.g.
+///   `mysql://root:mysql@127.0.0.1:3306/gha_cache_bootstrap`.
+///   The path component is the bootstrap database the per-test
+///   `CREATE DATABASE` runs against; it is rewritten to point at the
+///   per-test database for the actual `Db`.
+///
+/// # Panics
+/// When `DATABASE_URL` is unset. Callers are `#[ignore]`'d so default
+/// `cargo test` never reaches this path.
+async fn mysql_setup() -> SetupResult {
+    use sqlx::Executor;
+    use sqlx::mysql::MySqlPoolOptions;
+
+    let base_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set for MySQL conformance; run `cargo test -- --ignored`");
+    let database = format!("test_{}", uuid::Uuid::new_v4().simple());
+
+    let bootstrap = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect(&base_url)
+        .await
+        .unwrap();
+    bootstrap
+        .execute(format!("CREATE DATABASE `{database}`").as_str())
+        .await
+        .unwrap();
+    bootstrap.close().await;
+
+    // Re-point the URL's path component at the per-test database. The
+    // bootstrap URL ends with `/<bootstrap_db>(?...)?`; we replace the
+    // path between the host and any query string.
+    let url = swap_db_in_mysql_url(&base_url, &database);
+    let db = MysqlDb::connect(&url).await.unwrap();
+    db.migrate().await.unwrap();
+
+    (
+        Arc::new(db),
+        Box::new(MysqlDbGuard {
+            url: base_url,
+            database,
+        }),
+    )
+}
+
+/// RAII guard that drops the per-test `MySQL` database on scope exit.
+/// Mirrors `SchemaGuard` for Postgres — a fresh thread-owned runtime
+/// runs a one-shot pool so cleanup isn't entangled with the per-test
+/// pool's lifecycle.
+struct MysqlDbGuard {
+    url: String,
+    database: String,
+}
+
+impl Drop for MysqlDbGuard {
+    fn drop(&mut self) {
+        use sqlx::Executor;
+        use sqlx::mysql::MySqlPoolOptions;
+        let url = self.url.clone();
+        let database = self.database.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Runtime::new() else {
+                return;
+            };
+            rt.block_on(async move {
+                if let Ok(pool) = MySqlPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                {
+                    let _ = pool
+                        .execute(format!("DROP DATABASE IF EXISTS `{database}`").as_str())
+                        .await;
+                    pool.close().await;
+                }
+            });
+        })
+        .join();
+    }
+}
+
+/// Replaces the path-component database name in a `mysql://` URL with
+/// `database`, preserving any query string. Specifically: between the
+/// host's `/` and the next `?` (or end of string) is overwritten.
+///
+/// Used by [`mysql_setup`] to retarget a bootstrap URL at a per-test
+/// database after `CREATE DATABASE`.
+fn swap_db_in_mysql_url(base: &str, database: &str) -> String {
+    let after_scheme_idx = base.find("://").map_or(0, |i| i + 3);
+    let path_start = base[after_scheme_idx..]
+        .find('/')
+        .map(|i| after_scheme_idx + i);
+    path_start.map_or_else(
+        || format!("{base}/{database}"),
+        |start| {
+            let rest = &base[start + 1..];
+            let query = rest.find('?').map_or("", |i| &rest[i..]);
+            format!("{}/{database}{query}", &base[..start])
+        },
     )
 }
 
@@ -306,9 +415,46 @@ db_conformance_cases!(
     list_storage_locations_paginates,
 );
 
+db_conformance_cases!(
+    mysql,
+    mysql_setup,
+    ignore: "requires DATABASE_URL + running MySQL; `cargo test -- --ignored`",
+    upload_lifecycle_round_trip,
+    find_upload_by_coord_discriminates_each_field,
+    update_helpers_are_noops_on_unknown_ids,
+    find_location_for_entry_join,
+    touch_location_downloaded_sets_timestamp,
+    upsert_cache_entry_insert_then_update,
+    match_cache_entry_exact_primary,
+    match_cache_entry_prefixed_primary,
+    match_cache_entry_exact_restore,
+    match_cache_entry_prefixed_restore,
+    match_cache_entry_returns_none_when_no_match,
+    match_cache_entry_first_scope_short_circuits_without_restore_keys,
+    match_cache_entry_first_scope_wins,
+    finalize_transaction_rollback_is_atomic,
+    finalize_transaction_full_commit_shape,
+    deleting_storage_location_cascades_to_cache_entry,
+    lazy_merge_cas_winner_and_loser,
+    lazy_merge_mark_and_reset_round_trip,
+    lazy_merge_mark_parts_deleted_shape,
+    clear_stale_merge_claims_clears_old_claims,
+    clear_stale_merge_claims_leaves_fresh_claims,
+    clear_stale_merge_claims_ignores_completed_and_idle_rows,
+    get_merge_state_covers_all_four_combinations,
+    find_stale_uploads_filters_on_both_predicates,
+    delete_upload_if_stale_re_checks_predicate,
+    find_expired_locations_respects_cutoff,
+    find_orphan_locations_excludes_referenced_rows,
+    find_merged_with_parts_filters_on_merge_and_parts_flags,
+    list_cache_entries_no_filter_paginates,
+    list_cache_entries_filters_by_scope_and_repo_id,
+    list_storage_locations_paginates,
+);
+
 /// Smoke test for the programmatic runner — `SQLite` entry point always
-/// runs on `cargo test`; Postgres variant is `#[ignore]`'d alongside
-/// its macro-generated peers.
+/// runs on `cargo test`; Postgres / `MySQL` variants are `#[ignore]`'d
+/// alongside their macro-generated peers.
 #[tokio::test]
 async fn runner_executes_full_suite_against_sqlite() {
     let (db, _guard) = sqlite_setup().await;
@@ -320,4 +466,54 @@ async fn runner_executes_full_suite_against_sqlite() {
 async fn runner_executes_full_suite_against_postgres() {
     let (db, _guard) = postgres_setup().await;
     run_conformance_suite(&*db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL + running MySQL; `cargo test -- --ignored`"]
+async fn runner_executes_full_suite_against_mysql() {
+    let (db, _guard) = mysql_setup().await;
+    run_conformance_suite(&*db).await;
+}
+
+// ------------------------------------------------------------------------
+// `swap_db_in_mysql_url` — direct unit tests for the URL helper used by
+// `mysql_setup`. The helper has subtle path-vs-query handling; integration
+// tests only exercise the plain-URL case (the bootstrap URL CI sets), so
+// these pin the rare shapes operators feed in their own fixtures.
+// ------------------------------------------------------------------------
+
+#[test]
+fn swap_db_in_mysql_url_plain_path() {
+    assert_eq!(
+        swap_db_in_mysql_url("mysql://u:p@h:3306/boot", "test_42"),
+        "mysql://u:p@h:3306/test_42"
+    );
+}
+
+#[test]
+fn swap_db_in_mysql_url_preserves_query_string() {
+    assert_eq!(
+        swap_db_in_mysql_url("mysql://u:p@h:3306/boot?ssl-mode=REQUIRED", "test_42"),
+        "mysql://u:p@h:3306/test_42?ssl-mode=REQUIRED"
+    );
+}
+
+#[test]
+fn swap_db_in_mysql_url_no_path_appends() {
+    // No `/` after the host → append a path component for the new DB.
+    assert_eq!(
+        swap_db_in_mysql_url("mysql://u:p@h:3306", "test_42"),
+        "mysql://u:p@h:3306/test_42"
+    );
+}
+
+#[test]
+fn swap_db_in_mysql_url_no_scheme_treats_first_slash_as_path() {
+    // No `://` → `find` returns 0; the first `/` is treated as the
+    // path delimiter. Documents the fall-through; not a shape any
+    // real `mysql://` URL takes, just pinning the helper's behaviour.
+    assert_eq!(
+        swap_db_in_mysql_url("h:3306/boot", "test_42"),
+        "h:3306/test_42"
+    );
 }
