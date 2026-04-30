@@ -304,6 +304,9 @@ pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::list_cache_entries_no_filter_paginates(db).await;
     scenarios::list_cache_entries_filters_by_scope_and_repo_id(db).await;
     scenarios::list_storage_locations_paginates(db).await;
+    scenarios::find_cache_entry_by_id_returns_row_or_none(db).await;
+    scenarios::find_storage_location_by_id_returns_row_or_none(db).await;
+    scenarios::delete_cache_entries_by_filter_narrows_and_counts(db).await;
 }
 
 // ------------------------------------------------------------------------
@@ -376,6 +379,9 @@ db_conformance_cases!(
     list_cache_entries_no_filter_paginates,
     list_cache_entries_filters_by_scope_and_repo_id,
     list_storage_locations_paginates,
+    find_cache_entry_by_id_returns_row_or_none,
+    find_storage_location_by_id_returns_row_or_none,
+    delete_cache_entries_by_filter_narrows_and_counts,
 );
 
 db_conformance_cases!(
@@ -413,6 +419,9 @@ db_conformance_cases!(
     list_cache_entries_no_filter_paginates,
     list_cache_entries_filters_by_scope_and_repo_id,
     list_storage_locations_paginates,
+    find_cache_entry_by_id_returns_row_or_none,
+    find_storage_location_by_id_returns_row_or_none,
+    delete_cache_entries_by_filter_narrows_and_counts,
 );
 
 db_conformance_cases!(
@@ -450,6 +459,9 @@ db_conformance_cases!(
     list_cache_entries_no_filter_paginates,
     list_cache_entries_filters_by_scope_and_repo_id,
     list_storage_locations_paginates,
+    find_cache_entry_by_id_returns_row_or_none,
+    find_storage_location_by_id_returns_row_or_none,
+    delete_cache_entries_by_filter_narrows_and_counts,
 );
 
 /// Smoke test for the programmatic runner — `SQLite` entry point always

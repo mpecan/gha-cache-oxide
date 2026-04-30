@@ -26,7 +26,8 @@ use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions};
 use sqlx::{MySql, Transaction};
 
 use super::entities::{
-    CacheEntry, CacheEntryCoord, MergeState, NewUpload, PreviousLocation, StorageLocation, Upload,
+    CacheEntry, CacheEntryCoord, CacheEntryFilter, MergeState, NewUpload, PreviousLocation,
+    StorageLocation, Upload,
 };
 use super::id::new_uuid;
 use super::{Db, DbError, DbTx, ScopeQuery, escape_like_pattern};
@@ -370,6 +371,52 @@ impl Db for MysqlDb {
         sqlx::query_scalar("SELECT COUNT(*) FROM storage_locations")
             .fetch_one(&self.pool)
             .await
+    }
+
+    async fn find_cache_entry_by_id(&self, id: &str) -> Result<Option<CacheEntry>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM cache_entries WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    async fn find_storage_location_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StorageLocation>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM storage_locations WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    async fn delete_cache_entries_by_filter(
+        &self,
+        filter: CacheEntryFilter<'_>,
+    ) -> Result<u64, sqlx::Error> {
+        // MySQL placeholders are positional: each `?` consumes the
+        // next bound value, so we bind each filter twice (once for
+        // the IS-NULL check, once for the equality predicate). Same
+        // pattern as `list_cache_entries` in this file.
+        let rows = sqlx::query(
+            "DELETE FROM cache_entries \
+             WHERE (? IS NULL OR `key` = ?) \
+               AND (? IS NULL OR version = ?) \
+               AND (? IS NULL OR scope = ?) \
+               AND (? IS NULL OR `repoId` = ?)",
+        )
+        .bind(filter.key)
+        .bind(filter.key)
+        .bind(filter.version)
+        .bind(filter.version)
+        .bind(filter.scope)
+        .bind(filter.scope)
+        .bind(filter.repo_id)
+        .bind(filter.repo_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows)
     }
 
     async fn find_entry_by_exact_key(

@@ -74,8 +74,13 @@ GitHub Actions client. The whole sub-router is gated by
 | Method | Path                             | Description                                                       |
 |--------|----------------------------------|-------------------------------------------------------------------|
 | `GET`  | `/management/cache-entries`      | Paginated list. Optional query params: `scope`, `repoId`, `page`, `itemsPerPage`. |
+| `GET`  | `/management/cache-entries/{id}` | Single-entry fetch. Returns the row body or 404. |
+| `GET`  | `/management/cache-entries/match` | Runs the same matching algorithm `GetCacheEntryDownloadURL` uses. Query: `primaryKey`, `version`, `repoId`, `scopes` (multi), `restoreKeys` (multi, optional). Returns `{match, type}` or 404. |
+| `DELETE` | `/management/cache-entries`      | Bulk delete by query filter (`key`, `version`, `scope`, `repoId`). At least one filter required. Returns `{deleted: N}`. |
 | `DELETE` | `/management/cache-entries/{id}` | Deletes the entry, its storage location row, and the folder on the storage adapter. Returns 204. |
 | `GET`  | `/management/storage-locations`  | Paginated list. `page`, `itemsPerPage` query params (defaults 1 / 20, max 100). |
+| `GET`  | `/management/storage-locations/{id}` | Single-location fetch. Returns the row body or 404. |
+| `DELETE` | `/management/storage-locations/{id}` | Removes the row and its underlying folder. Returns 204; 404 if the row is already gone. |
 | `POST` | `/management/cleanup/trigger`    | Runs one cleanup pass synchronously and returns the per-task counts as JSON. |
 
 Auth behaviour:
@@ -94,16 +99,26 @@ diverges:
 1. Plain REST/JSON (no oRPC dependency, callable from `curl` / shell scripts).
 2. `Authorization: Bearer <KEY>` instead of `x-api-key` — the more conventional
    token convention, requested in the original issue.
-3. `DELETE /management/cache-entries/{id}` returns **404** when the id does
-   not exist (upstream's Kysely `delete` is idempotent and silently returns
-   void). REST-idiomatic — operators see "you got the id wrong" rather than
-   a silent success.
-4. Narrower surface: the issue scoped this round to four routes. Upstream
-   additionally exposes `GET /cache-entries/{id}`, `GET /cache-entries/match`,
-   `DELETE /cache-entries` (filtered bulk delete), `GET /storage-locations/{id}`
-   and `DELETE /storage-locations/{id}`; and its `findMany` filter accepts
-   `key` / `version` in addition to `scope` / `repoId`. None of those are wired
-   here yet — open a follow-up issue if you need one.
+3. `DELETE /management/cache-entries/{id}` and `DELETE /management/storage-locations/{id}`
+   return **404** when the id does not exist (upstream's Kysely `delete` is
+   idempotent and silently returns void). REST-idiomatic — operators see "you
+   got the id wrong" rather than a silent success.
+4. `GET /management/cache-entries/match` returns **404** when no entry matches
+   (upstream returns `200 OK` with body `null`). Status-code branching beats
+   nullable-body branching for `curl` / shell-script clients.
+5. `DELETE /management/cache-entries` (bulk filter) **rejects an empty filter
+   set with 400** (upstream silently deletes every row), and **honours the
+   `repoId` filter** (upstream's `deleteMany` accepts `repoId` in input but
+   silently drops it from the WHERE — see `lib/api/cache-entries.ts:163-168`).
+   Both divergences are pinned by tests; a future "fix to match upstream" will
+   fail loud.
+6. Bulk delete also returns `{"deleted": N}` (upstream returns nothing) so
+   operators can verify the filter caught what they expected.
+7. `findMany` filter accepts `scope` / `repoId` only, not `key` / `version` —
+   open a follow-up issue if you need finer-grained list filtering.
+8. No OpenAPI spec or oRPC `_rpc` surface yet — tracked separately as #77.
+9. On-demand `cleanup:storage-locations` after cache-entry DELETEs is tracked
+   as #71. Today the orphan sweep runs only on its hourly schedule.
 
 The wire shape of `cache_entries` / `storage_locations` rows themselves
 matches upstream verbatim (camelCase keys), so scripts that decode either
