@@ -6,7 +6,9 @@
 //! minted by `CreateCacheEntry` / `GetCacheEntryDownloadURL` (both auth'd).
 //!
 //! Upstream references:
-//! - `routes/devstoreaccount1/upload/[uploadId].put.ts`
+//! - `routes/devstoreaccount1/upload/[uploadId].put.ts` (canonical)
+//! - `routes/upload/[uploadId].put.ts` (alias — re-exports the
+//!   canonical handler; issue #74)
 //! - `routes/download/[cacheEntryId].ts`
 //! - `lib/storage.ts#uploadPart` and `lib/storage.ts#download`
 //!
@@ -74,6 +76,14 @@ use crate::storage::{ByteStream, StorageAdapter, StorageError};
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/devstoreaccount1/upload/{upload_id}", put(upload_part))
+        // Issue #74: upstream registers the same handler at the
+        // un-prefixed path too (`routes/upload/[uploadId].put.ts:1`
+        // re-exports the canonical handler). Real `actions/cache`
+        // clients always hit the canonical URL because that's what
+        // we return from `CreateCacheEntry`, but the alias exists
+        // for tools (and a handful of upstream tests) that bypass
+        // the mock-Azure prefix.
+        .route("/upload/{upload_id}", put(upload_part))
         .route("/download/{cache_entry_id}", get(download))
 }
 
