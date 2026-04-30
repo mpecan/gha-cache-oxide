@@ -3,7 +3,8 @@
 //! Houses the per-task modules (`uploads`, `merges`, `parts`,
 //! `entries`, `locations`) — each a port of an upstream
 //! `tasks/cleanup/*.ts` file — plus the three independent schedulers
-//! that drive them (see [`scheduler`]).
+//! that drive them (the `scheduler` submodule's public types are
+//! re-exported at the end of this module).
 //!
 //! # Three cadences (port of upstream `nitro.config.ts:25`)
 //!
