@@ -14,7 +14,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{Algorithm, Validation, dangerous::insecure_decode, decode, decode_header};
 use serde_json::json;
 
 use super::{AuthError, CacheScope, Claims, ScopeEntry};
@@ -78,15 +78,7 @@ fn extract_bearer(headers: &HeaderMap) -> Result<&str, AuthError> {
 /// scope/repo-id claims out of the payload. Do not use outside that
 /// code path.
 fn decode_unverified(token: &str) -> Result<Claims, AuthError> {
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.insecure_disable_signature_validation();
-    validation.validate_aud = false;
-    validation.validate_exp = false;
-    validation.validate_nbf = false;
-    // Empty `required_spec_claims` — we only want the payload.
-    validation.required_spec_claims = std::collections::HashSet::new();
-    let token_data = decode::<Claims>(token, &DecodingKey::from_secret(b""), &validation)
-        .map_err(|_| AuthError::InvalidToken)?;
+    let token_data = insecure_decode::<Claims>(token).map_err(|_| AuthError::InvalidToken)?;
     Ok(token_data.claims)
 }
 

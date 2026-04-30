@@ -7,10 +7,10 @@ use std::path::Path as StdPath;
 use std::sync::Arc;
 
 use futures::{StreamExt, TryStreamExt};
-use object_store::ObjectStore;
 use object_store::buffered::BufWriter;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::io::AsyncWriteExt;
 use url::Url;
 

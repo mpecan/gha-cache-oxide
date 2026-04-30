@@ -20,7 +20,7 @@ pub fn new_uuid() -> String {
 /// `lib/helpers.ts`).
 #[must_use]
 pub fn new_upload_id() -> i64 {
-    rand::thread_rng().gen_range(0_i64..=9_999_999_999_i64)
+    rand::rng().random_range(0_i64..=9_999_999_999_i64)
 }
 
 /// Current time as milliseconds since the `UNIX` epoch.
