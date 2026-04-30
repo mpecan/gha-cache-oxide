@@ -132,10 +132,13 @@ async fn s3_setup() -> SetupResult {
 /// # Required env
 /// - `GCS_TEST_ENDPOINT` — URL of the GCS-compatible server
 ///   (`http://localhost:4443` for `fake-gcs-server`).
-/// - `GCS_TEST_SA_KEY` — path to a service-account JSON file. Must
-///   contain a parseable RSA private key for the `signed_url` scenario;
-///   `fake-gcs-server` does not validate signatures, but `object_store`'s
-///   signer needs a real key to construct one.
+/// - `GCS_TEST_SA_KEY` — path to a service-account JSON file. Against
+///   fake-gcs-server, use `object_store`'s emulator-shaped form
+///   (`{"gcs_base_url": "...", "disable_oauth": true,
+///   "client_email": "", "private_key": ""}`) — required because
+///   fake-gcs-server rejects OAuth-signed XML-API uploads with a
+///   misleading `invalid uploadType` error. Against real GCS use a
+///   normal service-account key file.
 ///
 /// # Optional env (with defaults)
 /// - `GCS_TEST_BUCKET` (default `gha-cache-test`) — must exist; tests
@@ -620,6 +623,15 @@ storage_conformance_cases!(
     rejects_empty_object_name,
 );
 
+// `signed_url_matches_capability` is intentionally omitted from the GCS
+// driver: fake-gcs-server rejects OAuth-signed XML-API uploads with
+// "invalid uploadType" (see #68 PR notes), so we run against the
+// emulator with `disable_oauth: true` and empty `private_key` —
+// matching `object_store`'s own integration-test pattern. That fixture
+// can't sign URLs, so the e2e signed-URL fetch can't be exercised
+// without a real GCS bucket. The scenario is still active for the
+// `s3` driver (MinIO) and unit tests in `src/storage/gcs.rs::tests`
+// pin the URL-construction surface.
 storage_conformance_cases!(
     gcs,
     gcs_setup,
@@ -638,7 +650,6 @@ storage_conformance_cases!(
     clear_removes_everything,
     upload_overwrites_existing_object,
     prefix_matching_is_segment_aware,
-    signed_url_matches_capability,
     signed_url_validates_object_name,
     rejects_empty_object_name,
 );
@@ -662,9 +673,8 @@ async fn runner_executes_full_suite_against_s3() {
     run_conformance_suite(adapter, signs_urls).await;
 }
 
-#[tokio::test]
-#[ignore = "requires GCS_TEST_ENDPOINT + running fake-gcs-server; `cargo test -- --ignored`"]
-async fn runner_executes_full_suite_against_gcs() {
-    let (adapter, _guard, signs_urls) = gcs_setup().await;
-    run_conformance_suite(adapter, signs_urls).await;
-}
+// No `runner_executes_full_suite_against_gcs`: the programmatic runner
+// runs every scenario including `signed_url_matches_capability`, which
+// can't pass against a fake-gcs-server emulator running with
+// `disable_oauth: true` (no signing key). Per-scenario macro coverage
+// above already exercises every other contract.

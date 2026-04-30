@@ -215,30 +215,32 @@ jobs:
         with:
           shared-key: rust-build
 
-      # `object_store`'s GCS signer needs a parseable RSA key even when
-      # the target endpoint (fake-gcs-server) doesn't validate
-      # signatures. Generate one at job start and embed it in a minimal
-      # service-account JSON. The key is per-run, never persisted.
-      - name: Generate fake service account
+      # `object_store`'s GCS client emits XML-API requests at
+      # `{base_url}/{bucket}/{object}`. fake-gcs-server's XML-API write
+      # path rejects OAuth-signed requests with a misleading
+      # `invalid uploadType` 400. The fix used by `object_store`'s own
+      # integration tests is the special service-account JSON form
+      # below: `gcs_base_url` + `disable_oauth: true` tells the client
+      # to skip OAuth and emit anonymous requests against the emulator
+      # base URL. Trade-off: signed-URL tests can't run because the
+      # signer needs a real private key — those scenarios are excluded
+      # from the GCS conformance run (see `tests/storage_conformance.rs`).
+      - name: Write emulator service account
         run: |
-          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-            -out /tmp/sa-private.pem -quiet
-          jq -n --rawfile pk /tmp/sa-private.pem '{
-            type: "service_account",
-            project_id: "fake-project",
-            private_key_id: "fake",
-            private_key: $pk,
-            client_email: "fake@fake-project.iam.gserviceaccount.com",
-            client_id: "0",
-            auth_uri: "https://accounts.google.com/o/oauth2/auth",
-            token_uri: "https://oauth2.googleapis.com/token",
-            auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
-            client_x509_cert_url: "https://www.googleapis.com/robot/v1/metadata/x509/fake@fake-project.iam.gserviceaccount.com"
-          }' > /tmp/sa.json
+          cat > /tmp/sa.json <<'EOF'
+          {
+            "gcs_base_url": "http://localhost:4443",
+            "disable_oauth": true,
+            "client_email": "",
+            "private_key": "",
+            "private_key_id": ""
+          }
+          EOF
 
       # Sidecar via `docker run` for the same custom-healthcheck reason
-      # as the MinIO job. `-public-host` makes fake-gcs-server emit
-      # signed-URL hostnames the test runner can reach.
+      # as the MinIO job. `-backend memory` keeps the emulator state in
+      # RAM — same shape `object_store`'s own tests use. `-public-host`
+      # makes fake-gcs-server emit URLs the test runner can reach.
       - name: Start fake-gcs-server
         run: |
           docker run -d --name fake-gcs \
@@ -247,7 +249,7 @@ jobs:
             --health-interval 3s \
             --health-timeout 3s \
             --health-retries 20 \
-            "$FAKE_GCS_IMAGE" -scheme http -port 4443 -public-host localhost:4443
+            "$FAKE_GCS_IMAGE" -scheme http -port 4443 -public-host localhost:4443 -backend memory
 
       - name: Wait for fake-gcs-server healthy
         run: |
