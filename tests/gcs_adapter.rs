@@ -36,7 +36,7 @@ use url::Url;
 ///    grep the underlying `object_store` error.
 #[tokio::test]
 #[ignore = "requires GCS_TEST_ENDPOINT + a running fake-gcs-server; `cargo test --test gcs_adapter -- --ignored`"]
-async fn missing_bucket_produces_clear_error() {
+async fn gcs_missing_bucket_produces_clear_error() {
     let endpoint = std::env::var("GCS_TEST_ENDPOINT").expect(
         "GCS_TEST_ENDPOINT must be set; start fake-gcs-server and re-run `cargo test -- --ignored`",
     );
