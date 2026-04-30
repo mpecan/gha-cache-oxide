@@ -31,8 +31,8 @@ mod sqlite;
 use async_trait::async_trait;
 
 use crate::db::entities::{
-    CacheEntry, CacheEntryCoord, MatchRequest, MatchType, MatchedEntry, MergeState, NewUpload,
-    PreviousLocation, StorageLocation, Upload,
+    CacheEntry, CacheEntryCoord, CacheEntryFilter, MatchRequest, MatchType, MatchedEntry,
+    MergeState, NewUpload, PreviousLocation, StorageLocation, Upload,
 };
 
 pub use mysql::MysqlDb;
@@ -330,6 +330,55 @@ pub trait Db: Send + Sync {
     /// # Errors
     /// Returns `sqlx::Error` on query failure.
     async fn count_storage_locations(&self) -> Result<i64, sqlx::Error>;
+
+    // ---- management API single-row + bulk operations (issue #70) -------
+
+    /// Reads a `cache_entries` row by primary key. Returns `None` when
+    /// no row matches.
+    ///
+    /// Used by the management `GET /cache-entries/{id}` route to
+    /// expose a single entry for inspection.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_cache_entry_by_id(&self, id: &str) -> Result<Option<CacheEntry>, sqlx::Error>;
+
+    /// Reads a `storage_locations` row by primary key. Returns `None`
+    /// when no row matches.
+    ///
+    /// Used by the management `GET /storage-locations/{id}` route to
+    /// expose a single location for inspection.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_storage_location_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StorageLocation>, sqlx::Error>;
+
+    /// Deletes every `cache_entries` row matching the given filter.
+    /// Each `Some` filter narrows the WHERE clause; `None` fields
+    /// disable that filter. Returns the number of rows deleted.
+    ///
+    /// **Caller contract:** `CacheEntryFilter::default()` (all-`None`)
+    /// matches every row. The route handler at
+    /// `src/routes/management/cache_entries.rs` rejects an empty filter
+    /// with `400 Bad Request` so the endpoint can never become a
+    /// one-curl wipe; the trait method itself is permissive so unit
+    /// tests can exercise the all-rows path deliberately.
+    ///
+    /// # Divergence from upstream
+    /// Upstream's `deleteMany` (`lib/api/cache-entries.ts:163-168`)
+    /// silently drops the `repoId` filter even when supplied. We honour
+    /// it — issue #70's wire contract lists `repoId` as a filter. See
+    /// also the audit issue (#75) which flagged the upstream bug.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on delete failure.
+    async fn delete_cache_entries_by_filter(
+        &self,
+        filter: CacheEntryFilter<'_>,
+    ) -> Result<u64, sqlx::Error>;
 
     // ---- match_cache_entry (dialect-specific queries, default walk) ----
 

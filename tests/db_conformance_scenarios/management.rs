@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use gha_cache_oxide::db::Db;
-use gha_cache_oxide::db::entities::CacheEntryCoord;
+use gha_cache_oxide::db::entities::{CacheEntryCoord, CacheEntryFilter};
 
 /// Identifying triple for a seeded entry. Bundled with `coord` and
 /// `updated_at_ms` it keeps `seed_entry` under the 5-arg clippy limit.
@@ -247,5 +247,166 @@ pub async fn list_storage_locations_paginates(db: &dyn Db) {
             "loc-mgmt-locs-list-2",
             "loc-mgmt-locs-list-3",
         ],
+    );
+}
+
+/// `find_cache_entry_by_id` returns the seeded row when present and
+/// `None` for an id that has never existed. Pins the contract the
+/// management `GET /cache-entries/{id}` route depends on.
+pub async fn find_cache_entry_by_id_returns_row_or_none(db: &dyn Db) {
+    seed_entry(
+        db,
+        EntrySeed {
+            loc_id: "loc-mgmt-find-entry",
+            folder: "folder-mgmt-find-entry",
+            entry_id: "entry-mgmt-find-entry",
+        },
+        CacheEntryCoord {
+            key: "k",
+            version: "v",
+            scope: "scn-mgmt-find-entry",
+            repo_id: "42",
+        },
+        100,
+    )
+    .await;
+
+    let hit = db
+        .find_cache_entry_by_id("entry-mgmt-find-entry")
+        .await
+        .unwrap()
+        .expect("seeded entry should be returned");
+    assert_eq!(hit.id, "entry-mgmt-find-entry");
+    assert_eq!(hit.scope, "scn-mgmt-find-entry");
+    assert_eq!(hit.repo_id, "42");
+    assert_eq!(hit.location_id, "loc-mgmt-find-entry");
+
+    let miss = db
+        .find_cache_entry_by_id("entry-does-not-exist-anywhere")
+        .await
+        .unwrap();
+    assert!(miss.is_none(), "missing id must produce None, got {miss:?}");
+}
+
+/// `find_storage_location_by_id` returns the seeded row when present
+/// and `None` for an id that has never existed. Pins the contract the
+/// management `GET /storage-locations/{id}` and `DELETE /storage-locations/{id}`
+/// routes depend on.
+pub async fn find_storage_location_by_id_returns_row_or_none(db: &dyn Db) {
+    let mut tx = db.begin().await.unwrap();
+    tx.insert_storage_location("loc-mgmt-find-loc", "folder-mgmt-find-loc", 7)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let hit = db
+        .find_storage_location_by_id("loc-mgmt-find-loc")
+        .await
+        .unwrap()
+        .expect("seeded location should be returned");
+    assert_eq!(hit.id, "loc-mgmt-find-loc");
+    assert_eq!(hit.folder_name, "folder-mgmt-find-loc");
+    assert_eq!(hit.part_count, 7);
+
+    let miss = db
+        .find_storage_location_by_id("loc-does-not-exist-anywhere")
+        .await
+        .unwrap();
+    assert!(miss.is_none(), "missing id must produce None, got {miss:?}");
+}
+
+/// `delete_cache_entries_by_filter` honours each filter independently
+/// and returns the count of rows deleted. All-`None` filter deletes
+/// every matching row in the table — the route handler enforces a
+/// "must specify at least one" check before calling, so this scenario
+/// only exercises the per-filter narrowing semantics.
+pub async fn delete_cache_entries_by_filter_narrows_and_counts(db: &dyn Db) {
+    let scope_a = "scn-mgmt-del-a";
+    let scope_b = "scn-mgmt-del-b";
+
+    seed_delete_fixture(db, scope_a, scope_b).await;
+    assert_scope_only_filter(db, scope_a).await;
+    assert_combined_scope_repo_filter(db, scope_b).await;
+    assert_no_match_filter_returns_zero(db).await;
+}
+
+/// Two rows under `scope_a`, one under `scope_b`. All share the same
+/// key/version, so a `key`-only filter would catch all three.
+async fn seed_delete_fixture(db: &dyn Db, scope_a: &str, scope_b: &str) {
+    for (idx, scope, repo) in [
+        (1, scope_a, "100"),
+        (2, scope_a, "200"),
+        (3, scope_b, "100"),
+    ] {
+        seed_entry(
+            db,
+            EntrySeed {
+                loc_id: &format!("loc-mgmt-del-{idx}"),
+                folder: &format!("folder-mgmt-del-{idx}"),
+                entry_id: &format!("entry-mgmt-del-{idx}"),
+            },
+            CacheEntryCoord {
+                key: "del-key",
+                version: "v",
+                scope,
+                repo_id: repo,
+            },
+            i64::from(idx) * 10,
+        )
+        .await;
+    }
+}
+
+async fn assert_scope_only_filter(db: &dyn Db, scope_a: &str) {
+    let deleted = db
+        .delete_cache_entries_by_filter(CacheEntryFilter {
+            scope: Some(scope_a),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(deleted, 2, "scope filter should delete scope_a rows only");
+    assert_entry_absent(db, "entry-mgmt-del-1").await;
+    assert_entry_absent(db, "entry-mgmt-del-2").await;
+    assert!(
+        db.find_cache_entry_by_id("entry-mgmt-del-3")
+            .await
+            .unwrap()
+            .is_some(),
+        "scope_b row must survive a scope=A filter",
+    );
+}
+
+/// Combined filter (scope + repoId) — exercises the `repoId` arm
+/// that diverges from upstream's bugged `deleteMany`
+/// (lib/api/cache-entries.ts:163-168).
+async fn assert_combined_scope_repo_filter(db: &dyn Db, scope_b: &str) {
+    let deleted = db
+        .delete_cache_entries_by_filter(CacheEntryFilter {
+            scope: Some(scope_b),
+            repo_id: Some("100"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+    assert_entry_absent(db, "entry-mgmt-del-3").await;
+}
+
+async fn assert_no_match_filter_returns_zero(db: &dyn Db) {
+    let deleted = db
+        .delete_cache_entries_by_filter(CacheEntryFilter {
+            key: Some("never-seeded-key"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(deleted, 0);
+}
+
+async fn assert_entry_absent(db: &dyn Db, id: &str) {
+    assert!(
+        db.find_cache_entry_by_id(id).await.unwrap().is_none(),
+        "entry {id} should have been deleted",
     );
 }

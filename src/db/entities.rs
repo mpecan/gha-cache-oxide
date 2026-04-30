@@ -156,3 +156,18 @@ pub struct MatchRequest<'a> {
     pub scopes: &'a [&'a str],
     pub repo_id: &'a str,
 }
+
+/// Filter passed to
+/// [`Db::delete_cache_entries_by_filter`](super::Db::delete_cache_entries_by_filter).
+///
+/// Each `Some` field narrows the WHERE clause; `None` fields disable
+/// that filter. `Default::default()` (all-`None`) matches **every** row,
+/// which the route handler short-circuits to a `400 Bad Request` so the
+/// management endpoint can never become a one-curl wipe.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CacheEntryFilter<'a> {
+    pub key: Option<&'a str>,
+    pub version: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub repo_id: Option<&'a str>,
+}

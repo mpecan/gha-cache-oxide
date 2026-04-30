@@ -19,7 +19,8 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{Postgres, Transaction};
 
 use super::entities::{
-    CacheEntry, CacheEntryCoord, MergeState, NewUpload, PreviousLocation, StorageLocation, Upload,
+    CacheEntry, CacheEntryCoord, CacheEntryFilter, MergeState, NewUpload, PreviousLocation,
+    StorageLocation, Upload,
 };
 use super::id::new_uuid;
 use super::{Db, DbError, DbTx, ScopeQuery, escape_like_pattern};
@@ -361,6 +362,49 @@ impl Db for PostgresDb {
         sqlx::query_scalar("SELECT COUNT(*) FROM storage_locations")
             .fetch_one(&self.pool)
             .await
+    }
+
+    async fn find_cache_entry_by_id(&self, id: &str) -> Result<Option<CacheEntry>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM cache_entries WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    async fn find_storage_location_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<StorageLocation>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM storage_locations WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    async fn delete_cache_entries_by_filter(
+        &self,
+        filter: CacheEntryFilter<'_>,
+    ) -> Result<u64, sqlx::Error> {
+        // `$N::text IS NULL` matches the existing `list_cache_entries`
+        // pattern: each parameter is referenced once for the
+        // disable-filter check and again for the equality predicate.
+        // Postgres can re-reference `$N` directly, so we bind each
+        // filter exactly once.
+        let rows = sqlx::query(
+            "DELETE FROM cache_entries \
+             WHERE ($1::text IS NULL OR key = $1) \
+               AND ($2::text IS NULL OR version = $2) \
+               AND ($3::text IS NULL OR scope = $3) \
+               AND ($4::text IS NULL OR \"repoId\" = $4)",
+        )
+        .bind(filter.key)
+        .bind(filter.version)
+        .bind(filter.scope)
+        .bind(filter.repo_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows)
     }
 
     async fn find_entry_by_exact_key(
