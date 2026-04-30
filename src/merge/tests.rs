@@ -475,3 +475,113 @@ impl StorageAdapter for FailOnMergedUpload {
         self.inner.clear().await
     }
 }
+
+// ---- wait_for_merge_then_serve unit tests (issue #51) -----------------
+
+/// Helper: seed a location with the given (mergeStartedAt, mergedAt)
+/// flags. Returns the location id.
+async fn seed_location_with_flags(
+    db: &dyn Db,
+    folder: &str,
+    merge_started_at: Option<i64>,
+    merged_at: Option<i64>,
+) -> String {
+    let location_id = new_uuid();
+    let mut tx = db.begin().await.unwrap();
+    tx.insert_storage_location(&location_id, folder, 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    if let Some(t) = merge_started_at {
+        assert!(db.try_mark_merge_started(&location_id, t).await.unwrap());
+    }
+    if let Some(t) = merged_at {
+        db.mark_merged(&location_id, t).await.unwrap();
+    }
+    location_id
+}
+
+async fn drain_to_vec(stream: ByteStream) -> Vec<u8> {
+    let mut s = stream;
+    let mut out = Vec::new();
+    while let Some(chunk) = s.next().await {
+        out.extend_from_slice(&chunk.unwrap());
+    }
+    out
+}
+
+#[tokio::test]
+async fn wait_returns_merged_blob_when_already_merged() {
+    let (db, adapter, _tmp) = harness().await;
+    let folder = "wait-already-merged";
+    let location_id = seed_location_with_flags(&*db, folder, Some(100), Some(200)).await;
+    let bytes = b"merged-bytes";
+    let chunks: Vec<Result<Bytes, std::io::Error>> = vec![Ok(Bytes::copy_from_slice(bytes))];
+    adapter
+        .upload_stream(
+            &format!("{folder}/merged"),
+            futures::stream::iter(chunks).boxed(),
+        )
+        .await
+        .unwrap();
+
+    let stream = wait_for_merge_then_serve(&*db, &*adapter, &location_id, folder)
+        .await
+        .unwrap();
+    assert_eq!(drain_to_vec(stream).await, bytes);
+}
+
+#[tokio::test]
+async fn wait_returns_reset_when_both_flags_null() {
+    let (db, adapter, _tmp) = harness().await;
+    let location_id = seed_location_with_flags(&*db, "wait-reset", None, None).await;
+
+    match wait_for_merge_then_serve(&*db, &*adapter, &location_id, "wait-reset").await {
+        Err(WaitMergeError::Reset) => {}
+        Err(other) => panic!("expected Reset, got {other:?}"),
+        Ok(_) => panic!("expected Reset, got Ok"),
+    }
+}
+
+#[tokio::test]
+async fn wait_returns_location_gone_when_row_missing() {
+    let (db, adapter, _tmp) = harness().await;
+
+    match wait_for_merge_then_serve(&*db, &*adapter, "missing-id", "missing-folder").await {
+        Err(WaitMergeError::LocationGone) => {}
+        Err(other) => panic!("expected LocationGone, got {other:?}"),
+        Ok(_) => panic!("expected LocationGone, got Ok"),
+    }
+}
+
+#[tokio::test]
+async fn wait_unblocks_when_merger_finishes_during_poll() {
+    let (db, adapter, _tmp) = harness().await;
+    let folder = "wait-then-finish";
+    let location_id = seed_location_with_flags(&*db, folder, Some(1), None).await;
+
+    // Pre-populate the merged blob; a real merger would too.
+    let bytes = b"finished-mid-poll";
+    let chunks: Vec<Result<Bytes, std::io::Error>> = vec![Ok(Bytes::copy_from_slice(bytes))];
+    adapter
+        .upload_stream(
+            &format!("{folder}/merged"),
+            futures::stream::iter(chunks).boxed(),
+        )
+        .await
+        .unwrap();
+
+    // Fake-merger: after a short delay, set mergedAt.
+    let db_clone = db.clone();
+    let location_id_clone = location_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        db_clone.mark_merged(&location_id_clone, 999).await.unwrap();
+    });
+
+    // Wait should poll, see the flip, and serve.
+    let stream = wait_for_merge_then_serve(&*db, &*adapter, &location_id, folder)
+        .await
+        .unwrap();
+    assert_eq!(drain_to_vec(stream).await, bytes);
+}

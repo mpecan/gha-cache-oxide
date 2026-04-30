@@ -201,3 +201,49 @@ pub async fn clear_stale_merge_claims_ignores_completed_and_idle_rows(db: &dyn D
     assert!(stale.merge_started_at.is_none());
     assert!(stale.merged_at.is_none());
 }
+
+/// `get_merge_state` returns each of the four observable
+/// `(mergeStartedAt, mergedAt)` combinations, plus `None` for a
+/// non-existent location. Issue #51 — the loser-wait path polls
+/// this query, so both drivers must agree on the snapshot semantics.
+pub async fn get_merge_state_covers_all_four_combinations(db: &dyn Db) {
+    // (a) Non-existent location → None.
+    assert!(
+        db.get_merge_state("missing-conf-ms")
+            .await
+            .unwrap()
+            .is_none(),
+        "non-existent location must return None"
+    );
+
+    // Seed an idle location.
+    seed_location_with_flags(
+        db,
+        Seed {
+            loc_id: "loc-conf-ms",
+            folder: "folder-conf-ms",
+            entry_id: "entry-conf-ms",
+            scope: "scn-conf-ms",
+            merge_started_at: None,
+            merged_at: None,
+        },
+    )
+    .await;
+
+    // (b) Idle (both NULL).
+    let s = db.get_merge_state("loc-conf-ms").await.unwrap().unwrap();
+    assert!(s.merge_started_at.is_none(), "idle: mergeStartedAt is None");
+    assert!(s.merged_at.is_none(), "idle: mergedAt is None");
+
+    // (c) After CAS claim → mergeStartedAt set, mergedAt NULL.
+    assert!(db.try_mark_merge_started("loc-conf-ms", 100).await.unwrap());
+    let s = db.get_merge_state("loc-conf-ms").await.unwrap().unwrap();
+    assert_eq!(s.merge_started_at, Some(100));
+    assert!(s.merged_at.is_none());
+
+    // (d) After mark_merged → both set; mergeStartedAt unchanged.
+    db.mark_merged("loc-conf-ms", 200).await.unwrap();
+    let s = db.get_merge_state("loc-conf-ms").await.unwrap().unwrap();
+    assert_eq!(s.merge_started_at, Some(100));
+    assert_eq!(s.merged_at, Some(200));
+}

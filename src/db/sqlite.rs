@@ -13,7 +13,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{Sqlite, Transaction};
 
 use super::entities::{
-    CacheEntry, CacheEntryCoord, NewUpload, PreviousLocation, StorageLocation, Upload,
+    CacheEntry, CacheEntryCoord, MergeState, NewUpload, PreviousLocation, StorageLocation, Upload,
 };
 use super::id::new_uuid;
 use super::{Db, DbError, DbTx, ScopeQuery, escape_like_pattern};
@@ -209,6 +209,15 @@ impl Db for SqliteDb {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn get_merge_state(&self, location_id: &str) -> Result<Option<MergeState>, sqlx::Error> {
+        sqlx::query_as::<_, MergeState>(
+            "SELECT mergeStartedAt, mergedAt FROM storage_locations WHERE id = ?",
+        )
+        .bind(location_id)
+        .fetch_optional(&self.pool)
+        .await
     }
 
     async fn clear_stale_merge_claims(&self, cutoff_ms: i64) -> Result<u64, sqlx::Error> {

@@ -30,7 +30,7 @@ mod sqlite;
 use async_trait::async_trait;
 
 use crate::db::entities::{
-    CacheEntry, CacheEntryCoord, MatchRequest, MatchType, MatchedEntry, NewUpload,
+    CacheEntry, CacheEntryCoord, MatchRequest, MatchType, MatchedEntry, MergeState, NewUpload,
     PreviousLocation, StorageLocation, Upload,
 };
 
@@ -190,6 +190,16 @@ pub trait Db: Send + Sync {
     /// # Errors
     /// Returns `sqlx::Error` on update failure.
     async fn reset_merge_flags(&self, location_id: &str) -> Result<(), sqlx::Error>;
+
+    /// Returns the merge-state columns for `location_id`, or `None`
+    /// when the row does not exist.
+    ///
+    /// Used by the loser-wait path (issue #51) to poll for merge
+    /// progress without re-joining `cache_entries`.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn get_merge_state(&self, location_id: &str) -> Result<Option<MergeState>, sqlx::Error>;
 
     /// Clears `mergeStartedAt` on every row where a lazy-merge was
     /// claimed but never finalized and the claim is older than

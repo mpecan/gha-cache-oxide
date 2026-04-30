@@ -40,3 +40,23 @@ pub fn internal_error(msg: &str) -> Response {
     tracing::error!(message = msg, "route internal error");
     error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
 }
+
+/// 503 Service Unavailable with `Retry-After: 1`. Used by the
+/// loser-wait path (issue #51) when the in-flight merge times out
+/// or the merger reset its flags — both transient conditions where
+/// the cache client's retry will succeed.
+pub fn service_unavailable_retry(msg: &str) -> Response {
+    tracing::warn!(message = msg, "loser-wait surfacing 503");
+    let body = Json(json!({
+        "statusCode": 503,
+        "message": msg,
+    }));
+    let mut resp = (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+    // `axum::http::HeaderValue::from_static` is infallible at compile
+    // time for ASCII-only `&'static str`, so this is panic-free.
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("1"),
+    );
+    resp
+}

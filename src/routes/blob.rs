@@ -60,8 +60,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::db::id::now_ms;
-use crate::merge::{self, LazyMergeOutcome};
-use crate::routes::errors::{bad_request, internal_error, not_found};
+use crate::merge::{self, LazyMergeOutcome, WaitMergeError};
+use crate::routes::errors::{bad_request, internal_error, not_found, service_unavailable_retry};
 use crate::state::AppState;
 use crate::storage::{ByteStream, StorageAdapter, StorageError};
 
@@ -162,27 +162,11 @@ async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<Stri
 
     spawn_touch_last_downloaded(&state, &location.id);
 
-    // Merged blob takes precedence: once `merged_at` is set, we serve
-    // from the single merged blob (upstream `lib/storage.ts:227-228`).
-    // If the blob is absent (external deletion, backup restore where
-    // DB and storage are out of sync), log and fall through to the
-    // parts logic — issue #17. The next check either 404s on
-    // `parts_deleted_at`, streams surviving parts, or lets the CAS
-    // branch re-merge.
-    if location.merged_at.is_some() {
-        let name = format!("{}/merged", location.folder_name);
-        match state.storage.download_stream(&name).await {
-            Ok(stream) => return octet_stream_response(stream),
-            Err(StorageError::ObjectNotFound(_)) => {
-                tracing::warn!(
-                    location_id = %location.id,
-                    folder = %location.folder_name,
-                    "merged blob missing despite mergedAt set; falling through to parts"
-                );
-            }
-            Err(e) => return internal_error(&e.to_string()),
-        }
-    }
+    let merged_blob_missing = match try_serve_merged_blob(&state, &location).await {
+        MergedBlobOutcome::Served(resp) => return resp,
+        MergedBlobOutcome::Missing => true,
+        MergedBlobOutcome::NotApplicable => false,
+    };
 
     // Parts deleted but no merged blob: the cache is stale. Upstream
     // would race the merge here; we treat it as a terminal cache miss
@@ -212,16 +196,29 @@ async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<Stri
         return resp;
     }
 
-    // If someone else is already merging (`merge_started_at` set),
-    // stream parts directly — upstream's
-    // `downloadFromCacheEntryLocation` path.
-    if location.merge_started_at.is_some() {
+    // Recovery fall-through (issue #17): the merged blob was advertised
+    // by the DB but is missing from storage. The wait path can't help
+    // here — it would just re-discover the missing blob. Stream parts
+    // directly instead. The CAS path also can't help because mergedAt
+    // is already set, so `start_lazy_merge` would return LostRace.
+    if merged_blob_missing {
         return stream_parts_response(state.storage.clone(), location.folder_name, expected_parts);
+    }
+
+    // If someone else is already merging (`merge_started_at` set,
+    // mergedAt not yet), wait for that merge to complete and serve the
+    // merged blob — issue #51. The previous code lazy-fetched parts
+    // directly, which raced with the winner's `finalize_merge`
+    // deleting them mid-stream. Upstream still has this race
+    // (`lib/storage.ts:301-306`); we deliberately diverge to close it.
+    if location.merge_started_at.is_some() {
+        return wait_or_error(&state, &location.id, &location.folder_name).await;
     }
 
     // Cold cache: claim the merge via CAS and tee the parts into a
     // merged blob on the way out.
     let folder = location.folder_name.clone();
+    let location_id = location.id.clone();
     match merge::start_lazy_merge(
         state.db.clone(),
         state.storage.clone(),
@@ -231,14 +228,77 @@ async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<Stri
     .await
     {
         Ok(LazyMergeOutcome::Claimed(stream)) => octet_stream_response(stream),
-        // Lost the CAS to another concurrent request. Parts are still
-        // intact (the winner only deletes them after `merged_at` is
-        // set); stream them directly. The winner's merge will still
-        // land.
-        Ok(LazyMergeOutcome::LostRace) => {
-            stream_parts_response(state.storage.clone(), folder, expected_parts)
-        }
+        // Lost the CAS to another concurrent request. Wait for that
+        // merge to land and serve the merged blob — issue #51. The
+        // previous fallback (stream parts directly) raced with the
+        // winner's parts-deletion mid-stream.
+        Ok(LazyMergeOutcome::LostRace) => wait_or_error(&state, &location_id, &folder).await,
         Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Outcome of the merged-blob fast path attempt at the top of `download`.
+enum MergedBlobOutcome {
+    /// `mergedAt` was set and the blob fetched successfully — return
+    /// the response directly.
+    Served(Response),
+    /// `mergedAt` was set but the blob is missing on storage. Caller
+    /// must fall through to streaming parts (issue #17 recovery).
+    Missing,
+    /// `mergedAt` was not set; caller proceeds with the parts /
+    /// in-flight / cold-cache branches.
+    NotApplicable,
+}
+
+/// Tries the merged-blob fast path: if `location.merged_at` is set,
+/// fetch `<folder>/merged` and return [`MergedBlobOutcome::Served`].
+/// Logs and reports [`MergedBlobOutcome::Missing`] on
+/// `ObjectNotFound` (backup-restore / out-of-sync DB — issue #17).
+/// Returns [`MergedBlobOutcome::Served`] wrapping a 500 on any other
+/// storage error; the caller short-circuits.
+async fn try_serve_merged_blob(
+    state: &AppState,
+    location: &crate::db::entities::StorageLocation,
+) -> MergedBlobOutcome {
+    if location.merged_at.is_none() {
+        return MergedBlobOutcome::NotApplicable;
+    }
+    let name = format!("{}/merged", location.folder_name);
+    match state.storage.download_stream(&name).await {
+        Ok(stream) => MergedBlobOutcome::Served(octet_stream_response(stream)),
+        Err(StorageError::ObjectNotFound(_)) => {
+            tracing::warn!(
+                location_id = %location.id,
+                folder = %location.folder_name,
+                "merged blob missing despite mergedAt set; falling through to parts"
+            );
+            MergedBlobOutcome::Missing
+        }
+        Err(e) => MergedBlobOutcome::Served(internal_error(&e.to_string())),
+    }
+}
+
+/// Drives [`merge::wait_for_merge_then_serve`] and renders its result
+/// as an HTTP response. Issue #51.
+async fn wait_or_error(state: &AppState, location_id: &str, folder_name: &str) -> Response {
+    match merge::wait_for_merge_then_serve(
+        state.db.as_ref(),
+        state.storage.as_ref(),
+        location_id,
+        folder_name,
+    )
+    .await
+    {
+        Ok(stream) => octet_stream_response(stream),
+        Err(WaitMergeError::Timeout) => {
+            service_unavailable_retry("merger did not finalise within timeout; retry")
+        }
+        Err(WaitMergeError::Reset) => {
+            service_unavailable_retry("merger reset its flags; retry will re-claim")
+        }
+        Err(WaitMergeError::LocationGone) => not_found("Cache file not found"),
+        Err(WaitMergeError::Db(e)) => internal_error(&e.to_string()),
+        Err(WaitMergeError::Storage(e)) => internal_error(&e.to_string()),
     }
 }
 
