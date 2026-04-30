@@ -18,11 +18,9 @@ pub(super) const PAGE_SIZE: i64 = 10;
 
 /// 1-minute staleness threshold matches upstream
 /// `tasks/cleanup/uploads.ts:16` ("we can be fairly aggressive in
-/// cleaning up abandoned uploads"). Note: the background scheduler
-/// runs hourly (issue #18) rather than every 5 min like upstream, so
-/// in practice an abandoned upload survives up to ~1 h before this
-/// threshold even gets evaluated. Documented divergence — see the
-/// PR's parity-notes section.
+/// cleaning up abandoned uploads"). The uploads scheduler runs on the
+/// upstream cron `*/5 * * * *` by default — operators override via
+/// `CLEANUP_UPLOADS_SCHEDULE`.
 pub(super) const STALENESS_MS: i64 = 60_000;
 
 /// Runs one cleanup pass. Returns the number of `uploads` rows

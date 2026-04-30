@@ -25,7 +25,7 @@ use tower::ServiceExt;
 
 use super::{AuthError, CacheScope, GITHUB_ISSUER};
 use crate::auth::{JwkEntry, JwksCache, JwksFetcher, require_github_token};
-use crate::config::{AppConfig, DbConfig, LogFormat, StorageConfig};
+use crate::config::{AppConfig, DbConfig, StorageConfig};
 use crate::db::{Db, SqliteDb};
 use crate::state::AppState;
 use crate::storage::FilesystemAdapter;
@@ -150,22 +150,15 @@ async fn build_harness(entries: Vec<JwkEntry>, skip_validation: bool) -> TestHar
     let fetcher = StaticFetcher::new(entries);
     let jwks = Arc::new(JwksCache::new(fetcher.clone()));
     let config = AppConfig {
-        api_base_url: "http://localhost:3000".parse().unwrap(),
-        port: 0,
-        log_format: LogFormat::Text,
-        cache_cleanup_older_than_days: 90,
-        disable_cleanup_jobs: true,
-        enable_direct_downloads: false,
         skip_token_validation: skip_validation,
-        management_api_key: None,
-        default_actions_results_url: "https://results-receiver.test/".parse().unwrap(),
-        proxy_max_request_body_bytes: 16 * 1024 * 1024,
-        storage: StorageConfig::Filesystem {
-            path: tmp.path().to_path_buf(),
-        },
-        database: DbConfig::Sqlite {
-            path: std::path::PathBuf::from(":memory:"),
-        },
+        ..AppConfig::test_defaults(
+            StorageConfig::Filesystem {
+                path: tmp.path().to_path_buf(),
+            },
+            DbConfig::Sqlite {
+                path: std::path::PathBuf::from(":memory:"),
+            },
+        )
     };
     let state = AppState::new(db, storage, jwks, config);
     let router = Router::new()

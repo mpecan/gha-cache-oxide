@@ -48,7 +48,17 @@ Minimum required to boot:
 | `STORAGE_DRIVER` | `filesystem`, `s3`, `gcs` | Required. Each driver unlocks its own set of vars (e.g. `STORAGE_FILESYSTEM_PATH`, `STORAGE_S3_BUCKET`). |
 | `DB_DRIVER` | `sqlite`, `postgres`, `mysql` | Required. Each driver unlocks its own set of vars (e.g. `DB_SQLITE_PATH`, `DB_POSTGRES_URL`). |
 
-Optional knobs with defaults: `PORT` (3000), `LOG_FORMAT` (`text`/`json`, default `text`), `CACHE_CLEANUP_OLDER_THAN_DAYS` (90), `DISABLE_CLEANUP_JOBS`, `ENABLE_DIRECT_DOWNLOADS`, `SKIP_TOKEN_VALIDATION`, `MANAGEMENT_API_KEY`, `DEFAULT_ACTIONS_RESULTS_URL` (default `https://results-receiver.actions.githubusercontent.com`), `PROXY_MAX_REQUEST_BODY_BYTES` (default 16 MiB = `16777216`).
+Optional knobs with defaults: `PORT` (3000), `LOG_FORMAT` (`text`/`json`, default `text`), `CACHE_CLEANUP_OLDER_THAN_DAYS` (90), `DISABLE_CLEANUP_JOBS`, `CLEANUP_UPLOADS_SCHEDULE` (`*/5 * * * *`), `CLEANUP_HOURLY_SCHEDULE` (`0 * * * *`), `CLEANUP_DAILY_SCHEDULE` (`0 0 * * *`), `ENABLE_DIRECT_DOWNLOADS`, `SKIP_TOKEN_VALIDATION`, `MANAGEMENT_API_KEY`, `DEFAULT_ACTIONS_RESULTS_URL` (default `https://results-receiver.actions.githubusercontent.com`), `PROXY_MAX_REQUEST_BODY_BYTES` (default 16 MiB = `16777216`).
+
+The three `CLEANUP_*_SCHEDULE` knobs are cron expressions and default
+to upstream's `nitro.config.ts` cron lines verbatim — `*/5 * * * *`
+for `cleanup:uploads`, `0 * * * *` for `cleanup:parts` +
+`cleanup:merges`, and `0 0 * * *` for `cleanup:cache-entries` +
+`cleanup:storage-locations`. 5-field upstream syntax is normalised to
+6-field (sec=0) before parsing; operators can also write 6-field
+directly (e.g. `*/30 * * * * *` for every 30 seconds). Cadences are
+wall-clock aligned, just like upstream cron. Set
+`DISABLE_CLEANUP_JOBS=true` to disable cleanup entirely.
 
 `DEFAULT_ACTIONS_RESULTS_URL` is the receiver the catch-all fallback
 proxy forwards unhandled paths to — `actions/cache` clients reach

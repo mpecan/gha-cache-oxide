@@ -102,7 +102,7 @@ mod tests {
 
     use super::{AuthOutcome, authorize, extract_bearer};
     use crate::auth::{AuthError, JwkEntry, JwksCache, JwksFetcher};
-    use crate::config::{AppConfig, DbConfig, LogFormat, Secret, StorageConfig};
+    use crate::config::{AppConfig, DbConfig, Secret, StorageConfig};
     use crate::db::SqliteDb;
     use crate::state::AppState;
     use crate::storage::FilesystemAdapter;
@@ -125,22 +125,15 @@ mod tests {
         let db = SqliteDb::connect_in_memory().await.unwrap();
         let jwks = Arc::new(JwksCache::new(Arc::new(StubFetcher)));
         let config = AppConfig {
-            api_base_url: "http://localhost:3000".parse().unwrap(),
-            port: 0,
-            log_format: LogFormat::Text,
-            cache_cleanup_older_than_days: 90,
-            disable_cleanup_jobs: true,
-            enable_direct_downloads: false,
-            skip_token_validation: true,
             management_api_key: key.map(|k| Secret::new(k.to_string())),
-            default_actions_results_url: "https://results-receiver.test/".parse().unwrap(),
-            proxy_max_request_body_bytes: 16 * 1024 * 1024,
-            storage: StorageConfig::Filesystem {
-                path: tmp.path().to_path_buf(),
-            },
-            database: DbConfig::Sqlite {
-                path: PathBuf::from(":memory:"),
-            },
+            ..AppConfig::test_defaults(
+                StorageConfig::Filesystem {
+                    path: tmp.path().to_path_buf(),
+                },
+                DbConfig::Sqlite {
+                    path: PathBuf::from(":memory:"),
+                },
+            )
         };
         (AppState::new(Arc::new(db), storage, jwks, config), tmp)
     }

@@ -43,7 +43,7 @@ use axum::http::{Request, StatusCode, header};
 use base64::Engine;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use gha_cache_oxide::auth::{AuthError, JwkEntry, JwksCache, JwksFetcher};
-use gha_cache_oxide::config::{AppConfig, DbConfig, LogFormat, StorageConfig};
+use gha_cache_oxide::config::{AppConfig, DbConfig, StorageConfig};
 use gha_cache_oxide::db::entities::{CacheEntryCoord, MatchRequest};
 use gha_cache_oxide::db::{Db, SqliteDb};
 use gha_cache_oxide::state::AppState;
@@ -132,23 +132,17 @@ impl Harness {
         let jwks = Arc::new(JwksCache::new(Arc::new(StubFetcher)));
         let config = AppConfig {
             api_base_url: API_BASE_URL.parse().unwrap(),
-            port: 0,
-            log_format: LogFormat::Text,
-            cache_cleanup_older_than_days: 90,
-            disable_cleanup_jobs: true,
-            enable_direct_downloads: false,
             // Bench tokens are signed but we skip verification so the
             // matcher path doesn't need a real JWKS endpoint behind it.
             skip_token_validation: true,
-            management_api_key: None,
-            default_actions_results_url: "https://results-receiver.test/".parse().unwrap(),
-            proxy_max_request_body_bytes: 16 * 1024 * 1024,
-            storage: StorageConfig::Filesystem {
-                path: tmp.path().to_path_buf(),
-            },
-            database: DbConfig::Sqlite {
-                path: PathBuf::from(":memory:"),
-            },
+            ..AppConfig::test_defaults(
+                StorageConfig::Filesystem {
+                    path: tmp.path().to_path_buf(),
+                },
+                DbConfig::Sqlite {
+                    path: PathBuf::from(":memory:"),
+                },
+            )
         };
         let state = AppState::new(db, storage, jwks, config);
         let router = gha_cache_oxide::build_app(state);
