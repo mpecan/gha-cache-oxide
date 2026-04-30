@@ -4,9 +4,9 @@
 //! cleanup on failure, ordering of DB vs blob mutations) here.
 //! Current occupants:
 //!
-//! - [`complete_upload`] — validate-and-commit the parts of an upload
+//! - `complete_upload` — validate-and-commit the parts of an upload
 //!   into a durable cache entry.
-//! - [`probe_storage_for_entry`] / [`purge_broken_entry`] — the
+//! - `probe_storage_for_entry` / `purge_broken_entry` — the
 //!   storage-health probe and FK-cascade purge primitives used by the
 //!   download path's purge-and-retry loop (#72).
 
