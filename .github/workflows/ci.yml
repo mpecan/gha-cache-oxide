@@ -126,10 +126,51 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-build
+      # Positional `postgres` filter scopes the shared db_conformance
+      # binary to postgres-named tests (postgres::*,
+      # runner_executes_full_suite_against_postgres). Without the
+      # filter, this job would also fire the mysql ignored tests
+      # against `DATABASE_URL`, which would parse as a postgres URL and
+      # fail at the first MySQL-specific query. Same scoping pattern as
+      # the integration-s3 / integration-gcs jobs.
       - name: Postgres conformance
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: cargo test --locked --test db_conformance -- --ignored
+        run: cargo test --locked --test db_conformance -- --ignored postgres
+
+  integration-mysql:
+    name: cargo test --ignored (mysql)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        # Major-pinned 8.x; `oracle` variant is the official upstream
+        # image. Dependabot's `docker` ecosystem (issue #49) tracks this.
+        image: mysql:8-oracle
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          # The bootstrap database `mysql_setup` connects to before
+          # creating its per-test database.
+          MYSQL_DATABASE: gha_cache_bootstrap
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping --silent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
+      # Positional `mysql` filter — symmetric with the postgres job.
+      - name: MySQL conformance
+        env:
+          DATABASE_URL: mysql://root:mysql@127.0.0.1:3306/gha_cache_bootstrap
+        run: cargo test --locked --test db_conformance -- --ignored mysql
 
   integration-s3:
     name: cargo test --ignored (s3 / minio)

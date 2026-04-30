@@ -39,4 +39,9 @@ pub enum ConfigError {
         "DB_POSTGRES_URL is mutually exclusive with DB_POSTGRES_{{HOST,PORT,USER,PASSWORD,DATABASE}}; set exactly one form"
     )]
     PostgresConflict,
+
+    #[error(
+        "DB_MYSQL_URL is mutually exclusive with DB_MYSQL_{{HOST,PORT,USER,PASSWORD,DATABASE}}; set exactly one form"
+    )]
+    MysqlConflict,
 }

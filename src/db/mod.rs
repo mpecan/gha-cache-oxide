@@ -24,6 +24,7 @@
 
 pub mod entities;
 pub mod id;
+mod mysql;
 mod postgres;
 mod sqlite;
 
@@ -34,6 +35,7 @@ use crate::db::entities::{
     PreviousLocation, StorageLocation, Upload,
 };
 
+pub use mysql::MysqlDb;
 pub use postgres::PostgresDb;
 pub use sqlite::SqliteDb;
 
