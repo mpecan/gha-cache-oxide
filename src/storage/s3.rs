@@ -34,11 +34,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
-use object_store::ObjectStore;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::buffered::BufWriter;
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
+use object_store::{ObjectStore, ObjectStoreExt};
 use reqwest::Method;
 use tokio::io::AsyncWriteExt;
 use url::Url;
