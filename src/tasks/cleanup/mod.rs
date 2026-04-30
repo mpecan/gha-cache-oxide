@@ -159,6 +159,46 @@ pub fn maybe_spawn(
     ))
 }
 
+/// Spawns one detached `cleanup:storage-locations` pass.
+///
+/// Used by the management cache-entry DELETE handlers (issue #71) —
+/// the route returns immediately while the orphan sweep runs in the
+/// background, mirroring upstream's
+/// `event.waitUntil(runTask('cleanup:storage-locations'))` at
+/// `lib/api/cache-entries.ts:142,164`.
+///
+/// Honours `DISABLE_CLEANUP_JOBS`: if cleanup is disabled, the spawn
+/// returns a future that resolves to `0` immediately without touching
+/// the DB or storage. Upstream's `runTask` flow short-circuits the
+/// same way (`tasks/cleanup/storage-locations.ts:13`) — an operator
+/// who has explicitly opted out of cleanup shouldn't see surprise
+/// background work running on every management delete.
+///
+/// The spawned future swallows its own errors: per-row failures are
+/// already logged at `warn` inside [`locations::run`], and the
+/// `JoinHandle` is dropped at the call site so a panic during the
+/// sweep is reported by tokio's default panic hook but doesn't surface
+/// to the HTTP client.
+///
+/// Returns the `JoinHandle` rather than `()` so tests that need
+/// determinism can await the sweep; production call sites discard it.
+pub fn spawn_locations_sweep(state: &crate::state::AppState) -> JoinHandle<u64> {
+    if state.config.disable_cleanup_jobs {
+        tracing::debug!("DISABLE_CLEANUP_JOBS=true - on-demand sweep is a no-op",);
+        return tokio::spawn(async { 0 });
+    }
+    let db = state.db.clone();
+    let storage = state.storage.clone();
+    tokio::spawn(async move {
+        let deleted = locations::run(&*db, &*storage).await;
+        tracing::info!(
+            deleted,
+            "on-demand cleanup:storage-locations sweep complete",
+        );
+        deleted
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

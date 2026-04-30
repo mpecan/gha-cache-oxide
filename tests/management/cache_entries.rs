@@ -201,3 +201,56 @@ async fn delete_unknown_cache_entry_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["message"], "Cache entry not found");
 }
+
+/// The single DELETE deletes the `storage_locations` row directly so
+/// the FK CASCADE handles the `cache_entries` removal — there's no
+/// orphan to reap. The on-demand sweep (#71) still fires for symmetry
+/// with `delete_many` and to defend against future refactors. Pin the
+/// invariant that the sweep doesn't undo the storage adapter's
+/// best-effort folder removal: the folder stays gone after the spawn
+/// completes.
+#[tokio::test]
+async fn delete_single_entry_does_not_resurrect_swept_storage() {
+    use std::time::Duration;
+
+    let h = harness(Some(KEY)).await;
+    seed_entry(
+        &*h.db,
+        "loc-single",
+        "fldr-single",
+        "entry-single",
+        "scope-single",
+    )
+    .await;
+    upload_test_file(h.storage.as_ref(), "fldr-single/parts/0").await;
+
+    let resp = h
+        .router
+        .clone()
+        .oneshot(req(
+            Method::DELETE,
+            "/management/cache-entries/entry-single",
+            Some(KEY),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The single delete + CASCADE already removed the storage_location
+    // row; the sweep should be a no-op. Wait long enough for the
+    // spawned future to run, then assert nothing has come back.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        h.db.find_storage_location_by_id("loc-single")
+            .await
+            .unwrap()
+            .is_none(),
+    );
+    assert_eq!(
+        h.storage
+            .count_files_in_folder("fldr-single/parts")
+            .await
+            .unwrap(),
+        0,
+    );
+}

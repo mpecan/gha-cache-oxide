@@ -115,6 +115,17 @@ pub(super) async fn delete(State(state): State<AppState>, Path(id): Path<String>
         );
     }
 
+    // On-demand orphan sweep (#71). Single-DELETE deletes the
+    // `storage_locations` row directly so the FK CASCADE handles the
+    // `cache_entries` removal — no orphan today. The hook still fires
+    // for symmetry with `delete_many` and to protect against a future
+    // refactor that switches this handler to delete `cache_entries`
+    // directly. `drop(...)` (rather than `let _ = ...`) silences
+    // clippy's `let_underscore_future` — `JoinHandle` is itself a
+    // future, but tokio's drop-detaches semantics is the behaviour we
+    // want.
+    drop(crate::tasks::cleanup::spawn_locations_sweep(&state));
+
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -285,12 +296,15 @@ struct DeleteManyResponse {
 /// returns no body; we surface the count because the alternative
 /// (operator manually counting) is uncomfortable for a destructive op.
 ///
-/// Storage cleanup is **not** performed here — the FK
+/// Storage cleanup runs out-of-band: the FK
 /// `cache_entries.locationId REFERENCES storage_locations(id) ON DELETE CASCADE`
 /// runs the OPPOSITE direction, so deleting `cache_entries` rows
-/// leaves their `storage_locations` rows orphan-but-present. The
-/// orphan sweep (`cleanup:storage-locations`) reaps them on its
-/// schedule; on-demand triggering is tracked separately as #71.
+/// leaves their `storage_locations` rows orphan-but-present. We spawn
+/// a detached `cleanup:storage-locations` sweep at the end of the
+/// success path (#71) — same shape as upstream's
+/// `event.waitUntil(runTask('cleanup:storage-locations'))` at
+/// `lib/api/cache-entries.ts:169`. The hourly background scheduler
+/// keeps running as a safety net.
 ///
 /// Honours `repoId` — divergent from upstream `deleteMany` which
 /// silently drops the filter (`lib/api/cache-entries.ts:163-168`).
@@ -313,7 +327,17 @@ pub(super) async fn delete_many(
     }
 
     match state.db.delete_cache_entries_by_filter(filter).await {
-        Ok(deleted) => Json(DeleteManyResponse { deleted }).into_response(),
+        Ok(deleted) => {
+            // On-demand orphan sweep (#71). Bulk delete removes
+            // `cache_entries` rows directly; their `storage_locations`
+            // rows + folders are now orphans. Spawn detached so the
+            // HTTP response isn't blocked on the sweep — mirrors
+            // upstream's `event.waitUntil(runTask(...))` at
+            // `lib/api/cache-entries.ts:169`. `drop(...)` silences
+            // `let_underscore_future`.
+            drop(crate::tasks::cleanup::spawn_locations_sweep(&state));
+            Json(DeleteManyResponse { deleted }).into_response()
+        }
         Err(e) => internal_error(&e.to_string()),
     }
 }
