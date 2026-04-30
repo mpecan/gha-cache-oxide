@@ -175,7 +175,7 @@ pub fn maybe_spawn(
 /// background work running on every management delete.
 ///
 /// The spawned future swallows its own errors: per-row failures are
-/// already logged at `warn` inside [`locations::run`], and the
+/// already logged at `warn` inside `locations::run`, and the
 /// `JoinHandle` is dropped at the call site so a panic during the
 /// sweep is reported by tokio's default panic hook but doesn't surface
 /// to the HTTP client.
