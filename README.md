@@ -117,8 +117,6 @@ diverges:
 7. `findMany` filter accepts `scope` / `repoId` only, not `key` / `version` —
    open a follow-up issue if you need finer-grained list filtering.
 8. No OpenAPI spec or oRPC `_rpc` surface yet — tracked separately as #77.
-9. On-demand `cleanup:storage-locations` after cache-entry DELETEs is tracked
-   as #71. Today the orphan sweep runs only on its hourly schedule.
 
 The wire shape of `cache_entries` / `storage_locations` rows themselves
 matches upstream verbatim (camelCase keys), so scripts that decode either

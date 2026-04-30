@@ -7,8 +7,10 @@
 //! original `#19` test set's filename (`management::*` test paths)
 //! while staying under the 700-line file limit per topic file.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -39,6 +41,19 @@ pub struct Harness {
 }
 
 pub async fn harness(management_api_key: Option<&str>) -> Harness {
+    harness_with(management_api_key, true).await
+}
+
+/// Variant of [`harness`] that wires up the on-demand cleanup sweeps
+/// by flipping `disable_cleanup_jobs` to `false`. Used by the #71
+/// orphan-sweep tests; everything else uses [`harness`] which keeps
+/// cleanup config-disabled (matches the default harness shape used by
+/// every pre-#71 test).
+pub async fn harness_with_cleanup_enabled(management_api_key: Option<&str>) -> Harness {
+    harness_with(management_api_key, false).await
+}
+
+async fn harness_with(management_api_key: Option<&str>, disable_cleanup_jobs: bool) -> Harness {
     let tmp = TempDir::new().unwrap();
     let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
@@ -50,7 +65,7 @@ pub async fn harness(management_api_key: Option<&str>) -> Harness {
         port: 0,
         log_format: LogFormat::Text,
         cache_cleanup_older_than_days: 90,
-        disable_cleanup_jobs: true,
+        disable_cleanup_jobs,
         enable_direct_downloads: false,
         skip_token_validation: true,
         management_api_key: management_api_key.map(|k| Secret::new(k.to_string())),
@@ -118,4 +133,28 @@ pub async fn upload_test_file(storage: &dyn StorageAdapter, name: &str) {
     let chunk: Result<Bytes, std::io::Error> = Ok(Bytes::from_static(b"hello"));
     let stream: ByteStream = futures::stream::iter(vec![chunk]).boxed();
     storage.upload_stream(name, stream).await.unwrap();
+}
+
+/// Polls `check` repeatedly until it returns `true` or the `timeout`
+/// elapses. Sleeps between polls so the surrounding tokio runtime can
+/// drive other spawned futures forward — used by the on-demand
+/// orphan-sweep tests (#71) to wait for `tokio::spawn`'d cleanup
+/// passes without coupling the assertion to wall-clock timing.
+///
+/// # Panics
+/// Panics with the supplied label after the timeout elapses with
+/// `check` still returning false.
+pub async fn poll_until<F, Fut>(timeout: Duration, label: &str, mut check: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if check().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("poll_until timed out after {timeout:?}: {label}");
 }
