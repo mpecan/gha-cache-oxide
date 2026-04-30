@@ -299,6 +299,7 @@ pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::find_stale_uploads_filters_on_both_predicates(db).await;
     scenarios::delete_upload_if_stale_re_checks_predicate(db).await;
     scenarios::find_expired_locations_respects_cutoff(db).await;
+    scenarios::find_expired_locations_excludes_null_last_downloaded_at(db).await;
     scenarios::find_orphan_locations_excludes_referenced_rows(db).await;
     scenarios::find_merged_with_parts_filters_on_merge_and_parts_flags(db).await;
     scenarios::list_cache_entries_no_filter_paginates(db).await;
@@ -374,6 +375,7 @@ db_conformance_cases!(
     find_stale_uploads_filters_on_both_predicates,
     delete_upload_if_stale_re_checks_predicate,
     find_expired_locations_respects_cutoff,
+    find_expired_locations_excludes_null_last_downloaded_at,
     find_orphan_locations_excludes_referenced_rows,
     find_merged_with_parts_filters_on_merge_and_parts_flags,
     list_cache_entries_no_filter_paginates,
@@ -414,6 +416,7 @@ db_conformance_cases!(
     find_stale_uploads_filters_on_both_predicates,
     delete_upload_if_stale_re_checks_predicate,
     find_expired_locations_respects_cutoff,
+    find_expired_locations_excludes_null_last_downloaded_at,
     find_orphan_locations_excludes_referenced_rows,
     find_merged_with_parts_filters_on_merge_and_parts_flags,
     list_cache_entries_no_filter_paginates,
@@ -454,6 +457,7 @@ db_conformance_cases!(
     find_stale_uploads_filters_on_both_predicates,
     delete_upload_if_stale_re_checks_predicate,
     find_expired_locations_respects_cutoff,
+    find_expired_locations_excludes_null_last_downloaded_at,
     find_orphan_locations_excludes_referenced_rows,
     find_merged_with_parts_filters_on_merge_and_parts_flags,
     list_cache_entries_no_filter_paginates,
