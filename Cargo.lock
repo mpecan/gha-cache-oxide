@@ -764,7 +764,7 @@ dependencies = [
  "jsonwebtoken",
  "object_store",
  "proptest",
- "rand 0.8.6",
+ "rand 0.9.4",
  "reqwest",
  "rsa",
  "serde",
