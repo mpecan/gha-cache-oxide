@@ -346,6 +346,22 @@ fn proxy_max_request_body_bytes_override_parses() {
 }
 
 #[test]
+fn proxy_max_request_body_bytes_zero_means_unlimited() {
+    // Audit conclusion (issue #76): the cap is a deliberate divergence
+    // from upstream's uncapped forwarding. Operators who need full
+    // upstream parity (or who hit a future flow that exceeds the cap)
+    // can switch it off with `PROXY_MAX_REQUEST_BODY_BYTES=0`, which
+    // we normalise to `usize::MAX` so `axum::body::to_bytes` accepts
+    // the entire buffer.
+    let mut setup = minimal_env();
+    set(&mut setup, "PROXY_MAX_REQUEST_BODY_BYTES", Some("0"));
+    with_env(&setup, || {
+        let cfg = AppConfig::from_env().unwrap();
+        assert_eq!(cfg.proxy_max_request_body_bytes, usize::MAX);
+    });
+}
+
+#[test]
 fn proxy_max_request_body_bytes_rejects_non_numeric() {
     let mut setup = minimal_env();
     set(&mut setup, "PROXY_MAX_REQUEST_BODY_BYTES", Some("huge"));

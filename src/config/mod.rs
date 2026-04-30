@@ -60,8 +60,14 @@ pub struct AppConfig {
     /// Oversized requests respond with `413 Payload Too Large`. Cache
     /// uploads use the explicit blob routes and never reach the
     /// fallback, so this only limits the small RPCs `actions/cache`
-    /// makes against the receiver. Per-port-only knob — no upstream
-    /// counterpart.
+    /// makes against the receiver.
+    ///
+    /// **Deliberate divergence from upstream** (`routes/[...path].ts`
+    /// forwards bodies without a cap; this is local `DoS` mitigation —
+    /// see `parse_proxy_max_body` for the audit context). Set
+    /// `PROXY_MAX_REQUEST_BODY_BYTES=0` to disable the cap entirely
+    /// (full upstream parity); the parser normalises `0` to
+    /// [`usize::MAX`].
     pub proxy_max_request_body_bytes: usize,
     pub storage: StorageConfig,
     pub database: DbConfig,
@@ -103,14 +109,28 @@ impl AppConfig {
                 "DEFAULT_ACTIONS_RESULTS_URL",
                 "https://results-receiver.actions.githubusercontent.com",
             )?,
-            proxy_max_request_body_bytes: env::usize_or_default(
-                "PROXY_MAX_REQUEST_BODY_BYTES",
-                16 * 1024 * 1024,
-            )?,
+            proxy_max_request_body_bytes: parse_proxy_max_body()?,
             storage: StorageConfig::from_env()?,
             database: DbConfig::from_env()?,
         })
     }
+}
+
+/// Reads `PROXY_MAX_REQUEST_BODY_BYTES`, normalising `0` to
+/// [`usize::MAX`].
+///
+/// The cap is a deliberate divergence from upstream's uncapped
+/// catch-all forwarding (`routes/[...path].ts`) — it's a `DoS`
+/// mitigation, not a feature parity item. The audit at issue #76
+/// found no current `actions/cache` v2 / `tonistiigi/go-actions-cache`
+/// flow that legitimately POSTs >16 MiB through the catch-all path,
+/// so 16 MiB is generous as a default. Operators who need full
+/// upstream parity (or who hit a future flow that exceeds the cap)
+/// set `PROXY_MAX_REQUEST_BODY_BYTES=0`, which we rewrite to
+/// `usize::MAX` so `axum::body::to_bytes` accepts the entire buffer.
+fn parse_proxy_max_body() -> Result<usize, ConfigError> {
+    let raw = env::usize_or_default("PROXY_MAX_REQUEST_BODY_BYTES", 16 * 1024 * 1024)?;
+    Ok(if raw == 0 { usize::MAX } else { raw })
 }
 
 fn parse_port() -> Result<u16, ConfigError> {

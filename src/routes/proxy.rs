@@ -21,7 +21,9 @@
 //! - Request bodies above
 //!   [`AppConfig::proxy_max_request_body_bytes`](crate::config::AppConfig::proxy_max_request_body_bytes)
 //!   are rejected with `413 Payload Too Large` — guards against
-//!   accidental denial of service through the proxy.
+//!   accidental denial of service through the proxy. **Deliberate
+//!   divergence from upstream** (which forwards bodies without a
+//!   cap); see the audit summary below.
 //! - Upstream responses are streamed straight back via
 //!   `axum::body::Body::from_stream` (reqwest `bytes_stream`).
 //! - Reqwest transport errors map to `502 Bad Gateway` and are logged.
@@ -29,6 +31,25 @@
 //! The reqwest client is the shared [`AppState::http_client`] so the
 //! connection pool / DNS cache is amortised across all outbound HTTP
 //! the server makes.
+//!
+//! # Audit (issue #76): why we keep the body cap
+//!
+//! The catch-all only fields requests that aren't covered by an
+//! explicit route — i.e. anything outside the Twirp cache surface,
+//! the Azure-blob upload routes (`/devstoreaccount1/upload/...` and
+//! `/upload/...`), and `/download/...`. In current GA tooling that
+//! means small JSON telemetry / summaries / attestation metadata
+//! against the results-receiver. The audit found no current
+//! `actions/cache` v2 / `tonistiigi/go-actions-cache` flow that
+//! legitimately POSTs >16 MiB through this proxy.
+//!
+//! The 16 MiB cap is therefore kept as a deliberate divergence from
+//! upstream (`DoS` mitigation, no upstream counterpart). For operators
+//! who need full upstream parity — or who hit a future flow that
+//! exceeds the cap — `PROXY_MAX_REQUEST_BODY_BYTES=0` is the
+//! unlimited / full-parity escape hatch (parser normalises `0` to
+//! `usize::MAX`; pinned by `body_cap_zero_lets_oversized_through`
+//! in `tests/proxy.rs`).
 
 use axum::body::Body;
 use axum::extract::{Request, State};
