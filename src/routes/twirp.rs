@@ -28,11 +28,17 @@
 //!   return 400 instead of upstream's implicit 500 via `throw new
 //!   Error`. The upload row has already been purged at that point, so
 //!   400 "client must re-reserve" is the truthful semantic.
-//! - `GetCacheEntryDownloadURL` does NOT include upstream's
-//!   missing-storage purge-and-retry loop (`lib/storage.ts:486-525`).
-//!   The default download URL points at our own `/download/{id}`
-//!   endpoint which itself is out of scope until #9 lands; until then
-//!   there is nothing for that loop to detect or retry against.
+//! - `GetCacheEntryDownloadURL` eagerly probes the matched entry's
+//!   storage and purges the row when the blob is gone (#72) — an
+//!   enhancement over upstream, which serves the URL unconditionally
+//!   and lets the `actions/cache` client 404 on the subsequent fetch.
+//!   When the probe sees an empty parts folder (not-yet-merged path)
+//!   or an empty location root (merged + `ENABLE_DIRECT_DOWNLOADS`
+//!   on), the entry's `storage_locations` row is deleted (FK CASCADE
+//!   removes `cache_entries`), `match_cache_entry` reruns, and the
+//!   next-best candidate is returned in the same response. Capped at
+//!   three probes per request to bound work on a misconfigured
+//!   backend.
 
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
@@ -45,7 +51,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::auth::{CacheScope, ScopeEntry, require_github_token};
-use crate::cache::{CompleteUploadError, CompleteUploadParams, complete_upload};
+use crate::cache::{
+    CompleteUploadError, CompleteUploadParams, MAX_STORAGE_PROBES, complete_upload,
+    probe_storage_for_entry, purge_broken_entry,
+};
 use crate::db::entities::{CacheEntry, CacheEntryCoord, MatchRequest, NewUpload};
 use crate::db::id::{new_upload_id, now_ms};
 use crate::routes::errors::{bad_request, forbidden, internal_error, not_found};
@@ -229,18 +238,69 @@ async fn get_cache_entry_download_url(
         repo_id: &scope.repo_id,
     };
 
-    match state.db.match_cache_entry(req).await {
-        Ok(Some(m)) => match resolve_download_url(&state, &m.entry).await {
-            Ok(url) => Json(DownloadOk {
-                ok: true,
-                signed_download_url: url,
-                matched_key: m.entry.key,
-            })
-            .into_response(),
-            Err(e) => internal_error(&e.to_string()),
-        },
-        Ok(None) => Json(OkFalse { ok: false }).into_response(),
-        Err(e) => internal_error(&e.to_string()),
+    purge_and_retry_loop(&state, req).await
+}
+
+/// Runs `match_cache_entry` → probe-storage → purge-and-retry loop
+/// (issue #72). Handles every branch: hit-with-healthy-storage
+/// (return URL), hit-with-missing-storage (purge, re-match),
+/// no-match-or-cap-hit (`{ok:false}`), DB / storage errors (500).
+///
+/// Probe + purge primitives live in [`crate::cache`]; this loop is
+/// HTTP-shaped and stays here.
+async fn purge_and_retry_loop(state: &AppState, req: MatchRequest<'_>) -> Response {
+    let mut attempts = 0_u8;
+    loop {
+        let matched = match state.db.match_cache_entry(req).await {
+            Ok(Some(m)) => m,
+            Ok(None) => return Json(OkFalse { ok: false }).into_response(),
+            Err(e) => return internal_error(&e.to_string()),
+        };
+
+        if attempts >= MAX_STORAGE_PROBES {
+            tracing::warn!(
+                attempts,
+                entry_id = %matched.entry.id,
+                "GetCacheEntryDownloadURL: probe cap hit; returning ok:false",
+            );
+            return Json(OkFalse { ok: false }).into_response();
+        }
+        attempts += 1;
+
+        let probe = probe_storage_for_entry(
+            &*state.db,
+            state.storage.as_ref(),
+            state.config.enable_direct_downloads,
+            &matched.entry,
+        )
+        .await;
+        match probe {
+            Ok(true) => {
+                return match resolve_download_url(state, &matched.entry).await {
+                    Ok(url) => Json(DownloadOk {
+                        ok: true,
+                        signed_download_url: url,
+                        matched_key: matched.entry.key,
+                    })
+                    .into_response(),
+                    Err(e) => internal_error(&e.to_string()),
+                };
+            }
+            Ok(false) => {
+                tracing::info!(
+                    entry_id = %matched.entry.id,
+                    location_id = %matched.entry.location_id,
+                    "GetCacheEntryDownloadURL: storage gone; purging and retrying",
+                );
+                if let Err(e) = purge_broken_entry(&*state.db, &matched.entry).await {
+                    return internal_error(&e.to_string());
+                }
+                // Fall through; the loop body re-runs match_cache_entry.
+                // The just-purged entry is gone (FK CASCADE removed it),
+                // so the next-best candidate is now selected.
+            }
+            Err(e) => return internal_error(&e.to_string()),
+        }
     }
 }
 
@@ -257,9 +317,8 @@ async fn get_cache_entry_download_url(
 /// - Every other combination falls back to the default server URL so
 ///   the first-download / non-signing / flag-off paths all keep working.
 ///
-/// Upstream's "purge missing storage" retry loop
-/// (`lib/storage.ts:501-507`) is deliberately not ported — see the
-/// module-level "Deviations from upstream" docstring.
+/// Called from `purge_and_retry_loop` after the matched entry's
+/// storage has been confirmed healthy by `probe_storage_for_entry`.
 async fn resolve_download_url(state: &AppState, entry: &CacheEntry) -> Result<String, sqlx::Error> {
     let default_url = format!(
         "{}/download/{}",

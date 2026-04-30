@@ -1,15 +1,17 @@
 //! Service-layer operations that span the DB and the storage adapter.
 //!
 //! Handlers stay thin by delegating multi-step dances (tx bounds,
-//! cleanup on failure, ordering of DB vs blob mutations) here. First
-//! occupant is the crate-internal `complete_upload` — the validate-and-commit step that
-//! turns a finished upload into a durable cache entry. When a second
-//! such operation lands, revisit whether these should become methods on
-//! a dedicated `Cache` struct; for one function, free functions are
-//! simpler.
+//! cleanup on failure, ordering of DB vs blob mutations) here.
+//! Current occupants:
+//!
+//! - `complete_upload` — validate-and-commit the parts of an upload
+//!   into a durable cache entry.
+//! - `probe_storage_for_entry` / `purge_broken_entry` — the
+//!   storage-health probe and FK-cascade purge primitives used by the
+//!   download path's purge-and-retry loop (#72).
 
 use crate::db::Db;
-use crate::db::entities::{CacheEntryCoord, Upload};
+use crate::db::entities::{CacheEntry, CacheEntryCoord, Upload};
 use crate::db::id::new_uuid;
 use crate::storage::{StorageAdapter, StorageError};
 
@@ -165,6 +167,85 @@ async fn commit_upload_tx(
 
     tx.commit().await?;
     Ok(previous)
+}
+
+/// Caps the storage-probe loop at three attempts per request. Mirrors
+/// the issue spec ("never spins more than 3 storage probes per
+/// request" — #72): three is enough for normal multi-scope walks while
+/// still bounding work on a misconfigured backend.
+pub(crate) const MAX_STORAGE_PROBES: u8 = 3;
+
+/// Errors returned by [`probe_storage_for_entry`].
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProbeError {
+    #[error("db error: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+}
+
+/// Returns `Ok(true)` when storage backing `entry` looks healthy
+/// enough to hand the client a URL we expect to resolve, `Ok(false)`
+/// when the blob is provably gone, `Err` on transport failures.
+///
+/// Probe shape:
+/// - **Merged + `enable_direct_downloads = true`**: the caller is
+///   about to return a presigned URL pointing at `<folder>/merged`.
+///   Probe `count_files_in_folder(<folder>)`; if zero, the merged
+///   blob (and any leftover parts) is gone.
+/// - **Not-yet-merged**: the default URL routes through
+///   `/download/<id>` which reads parts. Probe
+///   `count_files_in_folder(<folder>/parts)`; if zero, parts are gone.
+/// - **Merged + `enable_direct_downloads = false`**: the default
+///   server-proxied URL has its own missing-blob recovery
+///   (`src/routes/blob.rs` lazy-merge fallback for issue #17), so no
+///   probe is needed here.
+///
+/// The narrow window "merged file deleted while parts/* still exist"
+/// is not caught by `count_files_in_folder("<folder>") > 0`. That's
+/// the lazy-merge recovery path's territory and is self-healing on
+/// the next download.
+///
+/// # Errors
+/// Returns [`ProbeError::Db`] when the location lookup fails (or the
+/// FK invariant `cache_entries.locationId` is violated, which would
+/// only happen on a corrupted DB), and [`ProbeError::Storage`] when
+/// the storage adapter fails the count.
+pub(crate) async fn probe_storage_for_entry(
+    db: &dyn Db,
+    storage: &dyn StorageAdapter,
+    enable_direct_downloads: bool,
+    entry: &CacheEntry,
+) -> Result<bool, ProbeError> {
+    let location = db
+        .find_location_for_entry(&entry.id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+
+    if enable_direct_downloads && location.merged_at.is_some() {
+        let count = storage.count_files_in_folder(&location.folder_name).await?;
+        return Ok(count > 0);
+    }
+    if location.merged_at.is_none() {
+        let parts_folder = format!("{}/parts", location.folder_name);
+        let count = storage.count_files_in_folder(&parts_folder).await?;
+        return Ok(count > 0);
+    }
+    Ok(true)
+}
+
+/// Deletes the entry's `storage_locations` row, which CASCADE-deletes
+/// the `cache_entries` row via the FK. The storage adapter is **not**
+/// touched: this is called by the download path after
+/// [`probe_storage_for_entry`] has already established the storage is
+/// gone, so there's nothing to remove.
+///
+/// # Errors
+/// Returns [`sqlx::Error`] on tx-begin / delete / commit failures.
+pub(crate) async fn purge_broken_entry(db: &dyn Db, entry: &CacheEntry) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    tx.delete_storage_location(&entry.location_id).await?;
+    tx.commit().await
 }
 
 #[cfg(test)]
