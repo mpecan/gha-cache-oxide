@@ -623,22 +623,28 @@ storage_conformance_cases!(
     rejects_empty_object_name,
 );
 
-// `signed_url_matches_capability` is intentionally omitted from the GCS
-// driver: fake-gcs-server rejects OAuth-signed XML-API uploads with
-// "invalid uploadType" (see #68 PR notes), so we run against the
-// emulator with `disable_oauth: true` and empty `private_key` —
-// matching `object_store`'s own integration-test pattern. That fixture
-// can't sign URLs, so the e2e signed-URL fetch can't be exercised
-// without a real GCS bucket. The scenario is still active for the
-// `s3` driver (MinIO) and unit tests in `src/storage/gcs.rs::tests`
-// pin the URL-construction surface.
+// Two scenarios are intentionally omitted from the GCS driver,
+// matching `object_store`'s own integration-test pattern (see
+// `gcp/mod.rs:316-340` in object_store-0.13.2):
+//
+// - `signed_url_matches_capability`: we run against fake-gcs-server
+//   with the `disable_oauth: true` SA fixture (the only shape that
+//   makes XML-API uploads succeed), and that fixture has no private
+//   key — so `signed_url(...)` can't sign. Both the `s3` driver
+//   (MinIO) and unit tests in `src/storage/gcs.rs::tests` keep this
+//   surface covered.
+// - `round_trip_crosses_buffer_flush`: triggers `BufWriter`'s XML-API
+//   multipart upload (`POST ?uploads=`), which fake-gcs-server does
+//   not implement (https://github.com/fsouza/fake-gcs-server/issues/852).
+//   Single-shot PUT round-trips are still exercised by
+//   `round_trip_zero_bytes` and `round_trip_small_payload`. Multipart
+//   parity is verified against real GCS in a manual sweep.
 storage_conformance_cases!(
     gcs,
     gcs_setup,
     ignore: "requires GCS_TEST_ENDPOINT + running fake-gcs-server; `cargo test -- --ignored`",
     round_trip_zero_bytes,
     round_trip_small_payload,
-    round_trip_crosses_buffer_flush,
     download_missing_returns_object_not_found,
     upload_rejects_directory_traversal,
     download_rejects_absolute_path,
