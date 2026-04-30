@@ -39,17 +39,25 @@ fn blockid_48(index: u64) -> String {
     base64::engine::general_purpose::STANDARD.encode(buf.as_bytes())
 }
 
-fn put_upload(id: i64, query: &str, body: Body) -> Request<Body> {
+/// Builds a `PUT` against the upload endpoint at the given path
+/// prefix. The data plane registers the same handler under both
+/// `/devstoreaccount1/upload` (canonical) and `/upload` (issue #74
+/// alias), so tests can parameterise over both prefixes.
+fn put_upload_at(prefix: &str, id: i64, query: &str, body: Body) -> Request<Body> {
     let uri = if query.is_empty() {
-        format!("/devstoreaccount1/upload/{id}")
+        format!("{prefix}/{id}")
     } else {
-        format!("/devstoreaccount1/upload/{id}?{query}")
+        format!("{prefix}/{id}?{query}")
     };
     Request::builder()
         .method("PUT")
         .uri(uri)
         .body(body)
         .unwrap()
+}
+
+fn put_upload(id: i64, query: &str, body: Body) -> Request<Body> {
+    put_upload_at("/devstoreaccount1/upload", id, query, body)
 }
 
 fn get_download(entry_id: &str) -> Request<Body> {
@@ -209,6 +217,68 @@ async fn upload_to_unknown_id_is_404() {
     let (status, body) = body_json(resp).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["message"], json!("Upload not found"));
+}
+
+// --- alias path parity (issue #74) ---------------------------------------
+
+/// `/upload/{uploadId}` must behave identically to
+/// `/devstoreaccount1/upload/{uploadId}` — upstream registers the
+/// same handler at both paths
+/// (`routes/upload/[uploadId].put.ts:1` re-exports the canonical
+/// handler). We exercise the full happy path (block upload +
+/// blocklist commit + finalize + download), the blocklist no-op for
+/// IDs that don't exist, and the unknown-ID error path through both
+/// prefixes inside one parameterised loop, asserting identical
+/// observable behaviour.
+#[tokio::test]
+async fn upload_alias_behaves_identically_to_canonical() {
+    for prefix in ["/devstoreaccount1/upload", "/upload"] {
+        // Blocklist no-op against an ID that doesn't exist — works on
+        // both prefixes because the commit-list step never touches
+        // the DB. Mirrors `blocklist_comp_returns_201_with_request_id`.
+        let h = harness().await;
+        let req = put_upload_at(prefix, 0, "comp=blocklist", Body::empty());
+        let resp = h.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "prefix={prefix}");
+        assert!(
+            resp.headers().get("x-ms-request-id").is_some(),
+            "x-ms-request-id required for tonistiigi/go-actions-cache (prefix={prefix})"
+        );
+
+        // Unknown ID with a real block-upload query → 404. Mirrors
+        // `upload_to_unknown_id_is_404`.
+        let query = format!("comp=block&blockid={}", blockid_48(0));
+        let req = put_upload_at(prefix, 99_999, &query, Body::from("x"));
+        let resp = h.router.clone().oneshot(req).await.unwrap();
+        let (status, body) = body_json(resp).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "prefix={prefix}");
+        assert_eq!(body["message"], json!("Upload not found"));
+
+        // Full happy path: create entry → upload one block via the
+        // alias → finalize → download → bytes match.
+        let token = write_token();
+        let upload_id = upload_id_from_create_entry(&h, &token).await;
+        let block = format!("comp=block&blockid={}", blockid_48(0));
+        let payload: &[u8] = b"alias-bytes";
+        let req = put_upload_at(
+            prefix,
+            upload_id,
+            &block,
+            Body::from(Bytes::copy_from_slice(payload)),
+        );
+        let resp = h.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "prefix={prefix}");
+
+        let entry_id = finalize_and_get_cache_entry_id(&h, &token).await;
+        let resp = h
+            .router
+            .clone()
+            .oneshot(get_download(&entry_id))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "prefix={prefix}");
+        assert_eq!(collect_body(resp).await, payload, "prefix={prefix}");
+    }
 }
 
 // --- round-trip via public HTTP surface ----------------------------------
