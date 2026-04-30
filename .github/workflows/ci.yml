@@ -202,10 +202,14 @@ jobs:
   integration-gcs:
     name: cargo test --ignored (gcs / fake-gcs-server)
     runs-on: ubuntu-latest
-    # fake-gcs-server publishes immutable major-tagged images; bump
-    # manually after release-notes review (same policy as MinIO).
+    # `tustvold/fake-gcs-server` is the fork `object_store`'s own
+    # integration tests use — the upstream `fsouza/fake-gcs-server`
+    # doesn't implement the XML-API write path that `object_store::gcp`
+    # emits at `{base_url}/{bucket}/{object}`, so PUTs land on the JSON
+    # API handler and fail with `invalid uploadType`. Digest-pinned for
+    # reproducibility (only `latest` tag exists, last pushed 2023-10-27).
     env:
-      FAKE_GCS_IMAGE: fsouza/fake-gcs-server:1.52
+      FAKE_GCS_IMAGE: tustvold/fake-gcs-server@sha256:dcd3aeacc07c731f1336e90c2889be2af8626ae993ee1fe2c0ba042ebbeb5a04
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -249,7 +253,7 @@ jobs:
             --health-interval 3s \
             --health-timeout 3s \
             --health-retries 20 \
-            "$FAKE_GCS_IMAGE" -scheme http -port 4443 -public-host localhost:4443 -backend memory
+            "$FAKE_GCS_IMAGE" -scheme http -public-host localhost:4443 -backend memory
 
       - name: Wait for fake-gcs-server healthy
         run: |
