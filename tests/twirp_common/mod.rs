@@ -114,6 +114,11 @@ pub fn read_only_token() -> String {
 pub struct Harness {
     pub router: axum::Router,
     pub db: Arc<dyn Db>,
+    /// The storage adapter the router serves. Exposed so integration
+    /// tests can plant or probe files directly when the test asserts
+    /// on storage state (issue #72's purge-and-retry suite reaches
+    /// for this; the older direct-download tests don't).
+    pub storage: Arc<dyn StorageAdapter>,
     pub tmp: TempDir,
 }
 
@@ -160,9 +165,14 @@ pub async fn harness_with(opts: HarnessOpts) -> Harness {
             path: PathBuf::from(":memory:"),
         },
     };
-    let state = AppState::new(db.clone(), storage, jwks, config);
+    let state = AppState::new(db.clone(), storage.clone(), jwks, config);
     let router = gha_cache_oxide::build_app(state);
-    Harness { router, db, tmp }
+    Harness {
+        router,
+        db,
+        storage,
+        tmp,
+    }
 }
 
 /// The fixed URL a `SigningFilesystem` shim hands back from `signed_url`.
@@ -283,4 +293,101 @@ pub async fn fetch_string(db: &dyn Db, sql: &str) -> String {
         .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap()
+}
+
+// --- Cache-entry seed helpers (shared by twirp_download.rs and friends) -
+
+/// Seeds a cache entry + storage location and returns the entry id.
+/// Plants a default part file (see [`seed_cache_entry_with_location`])
+/// so the storage probe (#72) treats the entry as healthy.
+pub async fn seed_cache_entry(h: &Harness, key: &str, scope: &str, updated_at: i64) -> String {
+    seed_cache_entry_with_location(h, key, scope, updated_at)
+        .await
+        .0
+}
+
+/// Seeds a cache entry + storage location and returns
+/// `(entry_id, location_id)` so tests can mark the location merged
+/// after the fact.
+///
+/// Plants a default part file under `<folder>/parts/0` so the
+/// `GetCacheEntryDownloadURL` storage probe (#72) treats the
+/// just-seeded location as healthy. Tests that need a *broken*
+/// location (i.e. specifically exercising the purge-and-retry path)
+/// use [`seed_cache_entry_with_location_no_storage`] instead.
+pub async fn seed_cache_entry_with_location(
+    h: &Harness,
+    key: &str,
+    scope: &str,
+    updated_at: i64,
+) -> (String, String) {
+    let (entry_id, location_id) =
+        seed_cache_entry_with_location_no_storage(h, key, scope, updated_at).await;
+    plant_part(h, &format!("folder-{location_id}")).await;
+    (entry_id, location_id)
+}
+
+/// Variant of [`seed_cache_entry_with_location`] that does NOT plant a
+/// default part file. Used by the #72 purge-and-retry tests to model
+/// a `cache_entries` row whose backing storage has been wiped.
+pub async fn seed_cache_entry_with_location_no_storage(
+    h: &Harness,
+    key: &str,
+    scope: &str,
+    updated_at: i64,
+) -> (String, String) {
+    use gha_cache_oxide::db::entities::CacheEntryCoord;
+    use gha_cache_oxide::db::id::new_uuid;
+    let location_id = new_uuid();
+    let mut tx = h.db.begin().await.unwrap();
+    tx.insert_storage_location(&location_id, &format!("folder-{location_id}"), 1)
+        .await
+        .unwrap();
+    let coord = CacheEntryCoord {
+        key,
+        version: "v1",
+        scope,
+        repo_id: "42",
+    };
+    let _ = tx
+        .upsert_cache_entry(coord, &location_id, updated_at)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let entry_id = fetch_string(
+        &*h.db,
+        &format!(
+            "SELECT id FROM cache_entries WHERE key = '{key}' AND scope = '{scope}' \
+             AND version = 'v1' AND repoId = '42'"
+        ),
+    )
+    .await;
+    (entry_id, location_id)
+}
+
+/// Plants a part file under `<folder>/parts/0` via the harness's
+/// own storage adapter so the #72 probe sees the same view the
+/// handler will.
+pub async fn plant_part(h: &Harness, folder: &str) {
+    use bytes::Bytes;
+    use futures::StreamExt;
+    let chunk: Result<Bytes, std::io::Error> = Ok(Bytes::from_static(b"hello"));
+    let stream: ByteStream = futures::stream::iter(vec![chunk]).boxed();
+    h.storage
+        .upload_stream(&format!("{folder}/parts/0"), stream)
+        .await
+        .unwrap();
+}
+
+/// Plants `<folder>/merged` via the harness's storage adapter so
+/// the merged-folder probe (#72 case 1) reports non-zero.
+pub async fn plant_merged(h: &Harness, folder: &str) {
+    use bytes::Bytes;
+    use futures::StreamExt;
+    let chunk: Result<Bytes, std::io::Error> = Ok(Bytes::from_static(b"merged-bytes"));
+    let stream: ByteStream = futures::stream::iter(vec![chunk]).boxed();
+    h.storage
+        .upload_stream(&format!("{folder}/merged"), stream)
+        .await
+        .unwrap();
 }

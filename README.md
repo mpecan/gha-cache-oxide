@@ -64,6 +64,30 @@ constrained networks can lower it; the default is generous (16 MiB).
 
 Secrets (`AWS_SECRET_ACCESS_KEY`, `DB_POSTGRES_PASSWORD`, `DB_MYSQL_PASSWORD`, `DB_POSTGRES_URL`, `MANAGEMENT_API_KEY`) are redacted in startup logs.
 
+## Deviations from upstream (cache HTTP API)
+
+The `actions/cache` wire contract is the spec; the surface diverges from
+upstream only in the following deliberate, tested ways:
+
+- **`GetCacheEntryDownloadURL` probes storage before responding (#72).**
+  Upstream serves the matched entry's URL unconditionally; if the blob
+  has been wiped (operator deleted the bucket, S3 retention rule fired,
+  parts dir was reaped without the merged copy), the `actions/cache`
+  client gets the URL and 404s on the subsequent fetch. This port runs
+  one `count_files_in_folder` probe on the matched location:
+  - empty parts folder (not-yet-merged path) **or** empty location root
+    (merged + `ENABLE_DIRECT_DOWNLOADS=on`) → delete the
+    `storage_locations` row (FK CASCADE removes `cache_entries`),
+    re-run `match_cache_entry`, return the next-best candidate
+    (or `{ok:false}` if exhausted).
+  - merged + `ENABLE_DIRECT_DOWNLOADS=off` is **not** probed; the
+    server-mediated `/download/<id>` route has its own missing-blob
+    recovery (lazy-merge fallback for #17).
+  Capped at three probes per request to bound work on a misconfigured
+  backend. Pinned by `tests/twirp_purge_retry.rs`. The narrow window
+  "merged file deleted while parts/* still exist" is intentionally not
+  caught by this coarse probe; that's the lazy-merge path's territory.
+
 ## Management API
 
 A small REST/JSON surface is exposed under `/management` for operators

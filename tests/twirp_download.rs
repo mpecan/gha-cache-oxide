@@ -9,7 +9,6 @@ mod twirp_common;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use gha_cache_oxide::db::entities::CacheEntryCoord;
 use gha_cache_oxide::storage::StorageAdapter;
 use serde_json::json;
 use tempfile::TempDir;
@@ -17,50 +16,9 @@ use tower::ServiceExt;
 
 use twirp_common::{
     BASE_PATH, FailingSigner, Harness, HarnessOpts, SIGNED_URL, SigningFilesystem, body_json,
-    fetch_string, harness, harness_with, mint_token, post, write_token,
+    harness, harness_with, mint_token, post, seed_cache_entry, seed_cache_entry_with_location,
+    write_token,
 };
-
-async fn seed_cache_entry(h: &Harness, key: &str, scope: &str, updated_at: i64) -> String {
-    seed_cache_entry_with_location(h, key, scope, updated_at)
-        .await
-        .0
-}
-
-/// Seeds a cache entry + storage location and returns `(entry_id, location_id)`
-/// so tests can mark the location as merged after the fact.
-async fn seed_cache_entry_with_location(
-    h: &Harness,
-    key: &str,
-    scope: &str,
-    updated_at: i64,
-) -> (String, String) {
-    use gha_cache_oxide::db::id::new_uuid;
-    let location_id = new_uuid();
-    let mut tx = h.db.begin().await.unwrap();
-    tx.insert_storage_location(&location_id, &format!("folder-{location_id}"), 1)
-        .await
-        .unwrap();
-    let coord = CacheEntryCoord {
-        key,
-        version: "v1",
-        scope,
-        repo_id: "42",
-    };
-    let _ = tx
-        .upsert_cache_entry(coord, &location_id, updated_at)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    let entry_id = fetch_string(
-        &*h.db,
-        &format!(
-            "SELECT id FROM cache_entries WHERE key = '{key}' AND scope = '{scope}' \
-             AND version = 'v1' AND repoId = '42'"
-        ),
-    )
-    .await;
-    (entry_id, location_id)
-}
 
 #[tokio::test]
 async fn hit_returns_url_and_matched_key() {
@@ -227,15 +185,17 @@ async fn with_restore_keys_walks_them() {
 //   4. flag on  + signer + NOT merged     → server URL (merge-and-serve)
 
 async fn signing_harness(enable_flag: bool) -> Harness {
-    // Store backing the SigningFilesystem in its own tmpdir so the shim
-    // and the harness root stay distinct — the harness's `tmp` is only
-    // used as an owned `TempDir` guard in the default path.
+    // The shim's underlying FilesystemAdapter must be rooted at the
+    // same TempDir as the harness's `tmp` — otherwise tests planting
+    // files via `h.storage` write to a directory the in-router
+    // `state.storage` doesn't see. We build the adapter against a
+    // fresh tmpdir, then pass `Some(...)` so `harness_with` adopts it
+    // (and the inner `tmp` becomes a one-shot guard not used by any
+    // handler).
     let root = TempDir::new().unwrap();
     let storage: Arc<dyn StorageAdapter> = Arc::new(SigningFilesystem::new(root.path()));
-    // Leak the root so it outlives the Harness — otherwise the tmpdir
-    // races against any late download attempt. Tests don't actually
-    // download here (they assert on the URL), but keep the fd alive
-    // just in case a handler touches storage.
+    // Leak the root so it outlives the Harness — `harness_with` keeps
+    // its own tmp guard, but the shim's underlying files live here.
     let _ = Box::leak(Box::new(root));
     harness_with(HarnessOpts {
         enable_direct_downloads: enable_flag,
