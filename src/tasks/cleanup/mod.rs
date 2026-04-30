@@ -1,54 +1,54 @@
-//! Background cleanup orchestration (issue #18).
+//! Background cleanup orchestration (issues #18, #73).
 //!
 //! Houses the per-task modules (`uploads`, `merges`, `parts`,
 //! `entries`, `locations`) — each a port of an upstream
-//! `tasks/cleanup/*.ts` file — plus the single hourly scheduler that
-//! drives them all in sequence.
+//! `tasks/cleanup/*.ts` file — plus the three independent schedulers
+//! that drive them (see [`scheduler`]).
 //!
-//! # Scheduler shape
+//! # Three cadences (port of upstream `nitro.config.ts:25`)
 //!
-//! Per the issue's explicit direction, the scheduler is one
-//! `tokio::spawn` running an `interval(Duration::from_secs(3600))`
-//! that calls [`run_all`] every tick. We don't pull in cron expressions
-//! (upstream uses `croner`); if operators ever need per-task cadences
-//! we can add them later. The first interval tick fires immediately —
-//! we skip it so startup isn't blocked on a cleanup pass.
+//! Upstream schedules its five cleanup tasks across three cron lines;
+//! we mirror that with three `tokio::spawn`s sharing one
+//! [`tokio_util::sync::CancellationToken`] for graceful shutdown:
 //!
-//! # Per-task ordering inside `run_all`
+//! | Cadence  | Default | Tasks                             | Cron upstream |
+//! |----------|---------|-----------------------------------|---------------|
+//! | uploads  | 5 min   | `cleanup:uploads`                 | `*/5 * * * *` |
+//! | hourly   | 1 h     | `cleanup:parts`, `cleanup:merges` | `0 * * * *`   |
+//! | daily    | 24 h    | `cleanup:cache-entries`,          | `0 0 * * *`   |
+//! |          |         | `cleanup:storage-locations`       |               |
 //!
-//! 1. **merges** — reset stale claims first so any download waiting
-//!    on `mergeStartedAt` can retry on the next request.
-//! 2. **uploads** — drop abandoned uploads (re-checks staleness inside
-//!    each row's tx; see [`crate::db::DbTx::delete_upload_if_stale`]).
-//! 3. **parts** — reap `<folder>/parts/` for already-merged rows.
-//! 4. **entries** — delete `storage_locations` whose
-//!    `lastDownloadedAt` is past the operator-configured retention.
-//! 5. **locations** — pick up any orphan `storage_locations` rows
-//!    (overwrites, imports, etc.).
-
-use std::sync::Arc;
-use std::time::Duration;
+//! Defaults match upstream cron exactly. Operators can override each
+//! cadence via `CLEANUP_{UPLOADS,HOURLY,DAILY}_SCHEDULE` env vars
+//! (5-field upstream syntax or 6-field with explicit seconds). The
+//! `DISABLE_CLEANUP_JOBS` env var still gates all three.
+//!
+//! # On-demand
+//!
+//! [`run_all`] still drives every per-task `run` in sequence, used by
+//! `POST /management/cleanup/trigger` for operators who want a
+//! one-shot reap without waiting for the next tick.
+//! [`spawn_locations_sweep`] handles the issue #71 on-demand orphan
+//! reap fired off after a management cache-entry DELETE.
 
 use serde::Serialize;
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
-use tokio_util::sync::CancellationToken;
 
 use crate::db::Db;
-use crate::db::id::now_ms;
 use crate::storage::StorageAdapter;
 
 pub(crate) mod entries;
 pub(crate) mod locations;
 pub(crate) mod merges;
 pub(crate) mod parts;
+mod scheduler;
 #[cfg(test)]
 mod test_utils;
 pub(crate) mod uploads;
 
-/// Scheduler cadence used by the production binary. Matches the
-/// issue's "single `tokio::spawn` with `interval(3600)`" direction.
-pub const PRODUCTION_INTERVAL: Duration = Duration::from_secs(3600);
+pub use scheduler::{
+    CleanupSchedules, Schedule, SchedulerSpawn, Schedulers, maybe_spawn, spawn_schedulers,
+};
 
 /// Per-task counts produced by a single [`run_all`] pass. Logged at
 /// `info` after every cycle so operators can see what was reaped.
@@ -65,7 +65,9 @@ pub struct CleanupReport {
     pub locations_deleted: u64,
 }
 
-/// Runs every cleanup task in sequence against `db` + `storage`.
+/// Runs every cleanup task in sequence against `db` + `storage`. Used
+/// by `POST /management/cleanup/trigger` (an on-demand pass — does
+/// not affect the background schedulers).
 ///
 /// Each task is best-effort and logs its own errors at `warn`; this
 /// function never propagates a `Result` because a partial pass is
@@ -88,75 +90,6 @@ pub async fn run_all(
         entries_deleted,
         locations_deleted,
     }
-}
-
-/// Spawns the background scheduler. The returned handle resolves once
-/// `shutdown` is cancelled and the in-flight cycle (if any) finishes.
-///
-/// Tests pass a small `interval` (e.g. 50 ms) plus a token they own
-/// so a few ticks fire deterministically before cancellation.
-pub fn spawn_scheduler(
-    db: Arc<dyn Db>,
-    storage: Arc<dyn StorageAdapter>,
-    cache_cleanup_older_than_days: u32,
-    interval: Duration,
-    shutdown: CancellationToken,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        // First tick fires immediately — consume it so startup isn't
-        // blocked on a cleanup pass.
-        ticker.tick().await;
-        loop {
-            tokio::select! {
-                () = shutdown.cancelled() => {
-                    tracing::info!("cleanup scheduler shutting down");
-                    break;
-                }
-                _ = ticker.tick() => {
-                    let report = run_all(
-                        &*db,
-                        &*storage,
-                        now_ms(),
-                        cache_cleanup_older_than_days,
-                    ).await;
-                    tracing::info!(?report, "cleanup cycle complete");
-                }
-            }
-        }
-    })
-}
-
-/// Convenience wrapper used by `src/main.rs`.
-///
-/// Spawns the scheduler iff `disable_cleanup_jobs` is `false`, logging
-/// the decision either way. Returns `None` when disabled. Tests bypass
-/// this and call [`spawn_scheduler`] directly so they own the
-/// `CancellationToken`.
-pub fn maybe_spawn(
-    db: Arc<dyn Db>,
-    storage: Arc<dyn StorageAdapter>,
-    cache_cleanup_older_than_days: u32,
-    disable_cleanup_jobs: bool,
-    shutdown: CancellationToken,
-) -> Option<JoinHandle<()>> {
-    if disable_cleanup_jobs {
-        tracing::info!("DISABLE_CLEANUP_JOBS=true - cleanup scheduler not started");
-        return None;
-    }
-    tracing::info!(
-        interval_secs = PRODUCTION_INTERVAL.as_secs(),
-        cache_cleanup_older_than_days,
-        "cleanup scheduler starting",
-    );
-    Some(spawn_scheduler(
-        db,
-        storage,
-        cache_cleanup_older_than_days,
-        PRODUCTION_INTERVAL,
-        shutdown,
-    ))
 }
 
 /// Spawns one detached `cleanup:storage-locations` pass.

@@ -37,15 +37,23 @@ async fn main() -> anyhow::Result<()> {
     let storage = connect_storage(&config.storage).await?;
     tracing::info!("storage ready");
 
-    // Spawn the background cleanup scheduler (issue #18) before the
-    // server starts accepting connections. `maybe_spawn` consults
-    // `disable_cleanup_jobs` and logs the decision; cleanup runs
-    // hourly and is shut down via `cleanup_token` after axum drains.
+    // Spawn the three background cleanup schedulers (issues #18, #73)
+    // before the server starts accepting connections. `maybe_spawn`
+    // consults `disable_cleanup_jobs` and logs the decision; the three
+    // cadences (uploads/hourly/daily) match upstream cron and are shut
+    // down via `cleanup_token` after axum drains.
     let cleanup_token = CancellationToken::new();
-    let cleanup_handle = cleanup::maybe_spawn(
-        db.clone(),
-        storage.clone(),
-        config.cache_cleanup_older_than_days,
+    let cleanup_schedulers = cleanup::maybe_spawn(
+        cleanup::SchedulerSpawn {
+            db: db.clone(),
+            storage: storage.clone(),
+            cache_cleanup_older_than_days: config.cache_cleanup_older_than_days,
+            schedules: cleanup::CleanupSchedules {
+                uploads: cleanup::Schedule::Cron(Box::new(config.cleanup_uploads_cron.clone())),
+                hourly: cleanup::Schedule::Cron(Box::new(config.cleanup_hourly_cron.clone())),
+                daily: cleanup::Schedule::Cron(Box::new(config.cleanup_daily_cron.clone())),
+            },
+        },
         config.disable_cleanup_jobs,
         cleanup_token.clone(),
     );
@@ -83,14 +91,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("awaiting in-flight lazy merges");
     merge_tracker.shutdown().await;
 
-    // Stop the cleanup scheduler. Cancellation lets the loop break at
-    // its next `tokio::select!` poll; an in-flight `run_all` finishes
-    // first so we don't leave a half-completed cleanup pass behind.
-    if let Some(handle) = cleanup_handle {
+    // Stop the cleanup schedulers. Cancellation lets each loop break
+    // at its next `tokio::select!` poll; in-flight cycles finish first
+    // so we don't leave a half-completed cleanup pass behind.
+    // `Schedulers::shutdown` joins all three handles and warn-logs any
+    // join error itself.
+    if let Some(schedulers) = cleanup_schedulers {
         cleanup_token.cancel();
-        if let Err(e) = handle.await {
-            tracing::warn!(error = %e, "cleanup scheduler join failed");
-        }
+        schedulers.shutdown().await;
     }
 
     tracing::info!("shutdown complete");

@@ -22,7 +22,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine;
 use gha_cache_oxide::auth::{AuthError, JwkEntry, JwksCache, JwksFetcher};
-use gha_cache_oxide::config::{AppConfig, DbConfig, LogFormat, StorageConfig};
+use gha_cache_oxide::config::{AppConfig, DbConfig, StorageConfig};
 use gha_cache_oxide::db::{Db, SqliteDb};
 use gha_cache_oxide::state::AppState;
 use gha_cache_oxide::storage::{ByteStream, FilesystemAdapter, StorageAdapter, StorageError};
@@ -148,22 +148,15 @@ pub async fn harness_with(opts: HarnessOpts) -> Harness {
         .unwrap_or_else(|| Arc::new(FilesystemAdapter::new(tmp.path()).unwrap()));
     let jwks = Arc::new(JwksCache::new(Arc::new(StaticFetcher)));
     let config = AppConfig {
-        api_base_url: "http://localhost:3000".parse().unwrap(),
-        port: 0,
-        log_format: LogFormat::Text,
-        cache_cleanup_older_than_days: 90,
-        disable_cleanup_jobs: true,
         enable_direct_downloads: opts.enable_direct_downloads,
-        skip_token_validation: true,
-        management_api_key: None,
-        default_actions_results_url: "https://results-receiver.test/".parse().unwrap(),
-        proxy_max_request_body_bytes: 16 * 1024 * 1024,
-        storage: StorageConfig::Filesystem {
-            path: tmp.path().to_path_buf(),
-        },
-        database: DbConfig::Sqlite {
-            path: PathBuf::from(":memory:"),
-        },
+        ..AppConfig::test_defaults(
+            StorageConfig::Filesystem {
+                path: tmp.path().to_path_buf(),
+            },
+            DbConfig::Sqlite {
+                path: PathBuf::from(":memory:"),
+            },
+        )
     };
     let state = AppState::new(db.clone(), storage.clone(), jwks, config);
     let router = gha_cache_oxide::build_app(state);
