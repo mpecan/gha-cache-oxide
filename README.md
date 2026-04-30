@@ -72,6 +72,13 @@ routes and never reach the fallback, so this only limits the small
 RPCs `actions/cache` makes against the receiver. Operators on
 constrained networks can lower it; the default is generous (16 MiB).
 
+This is a **deliberate divergence** from upstream's
+`routes/[...path].ts`, which forwards bodies without a cap — local
+DoS mitigation, not a feature parity item. Set
+`PROXY_MAX_REQUEST_BODY_BYTES=0` to disable the cap entirely (full
+upstream parity); the parser normalises `0` to `usize::MAX` so any
+incoming body forwards through to the receiver.
+
 Secrets (`AWS_SECRET_ACCESS_KEY`, `DB_POSTGRES_PASSWORD`, `DB_MYSQL_PASSWORD`, `DB_POSTGRES_URL`, `MANAGEMENT_API_KEY`) are redacted in startup logs.
 
 ## Deviations from upstream (cache HTTP API)

@@ -317,6 +317,36 @@ async fn rejects_oversized_request_body() {
 }
 
 #[tokio::test]
+async fn body_cap_zero_lets_oversized_through() {
+    // Audit conclusion (issue #76): `PROXY_MAX_REQUEST_BODY_BYTES=0`
+    // is the unlimited / full-parity-with-upstream escape hatch.
+    // A 17 MiB body (well over the 16 MiB default cap) must forward
+    // successfully when the cap is off — pin the boundary so a
+    // future "let's just use usize_or_default again" refactor would
+    // start failing 413s on this path.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/uncapped"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let h = harness_with_overrides(&mock.uri(), usize::MAX).await;
+
+    let oversized = vec![0u8; 17 * 1024 * 1024];
+    let resp = h
+        .router
+        .oneshot(req(Method::POST, "/uncapped", Body::from(oversized)))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "with cap=0 (unlimited) a 17 MiB body must forward successfully"
+    );
+}
+
+#[tokio::test]
 async fn body_cap_is_configurable() {
     // Pin the AppConfig.proxy_max_request_body_bytes plumbing: a 1 KiB
     // cap rejects a 1025-byte body but lets a 1024-byte body through.
