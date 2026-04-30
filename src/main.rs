@@ -10,7 +10,9 @@ use gha_cache_oxide::config::{AppConfig, DbConfig, PostgresConfig, StorageConfig
 use gha_cache_oxide::db::id::now_ms;
 use gha_cache_oxide::db::{Db, PostgresDb, SqliteDb};
 use gha_cache_oxide::state::AppState;
-use gha_cache_oxide::storage::{FilesystemAdapter, S3Adapter, S3Config, StorageAdapter};
+use gha_cache_oxide::storage::{
+    FilesystemAdapter, GcsAdapter, GcsConfig, S3Adapter, S3Config, StorageAdapter,
+};
 use gha_cache_oxide::tasks::cleanup;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -172,9 +174,8 @@ fn postgres_url(cfg: &PostgresConfig) -> String {
     }
 }
 
-/// Builds a storage adapter for the configured driver. Filesystem and
-/// S3 are wired up; GCS is defined in the config contract but not yet
-/// implemented — it surfaces an explicit startup error.
+/// Builds a storage adapter for the configured driver. Filesystem, S3,
+/// and GCS are all wired up.
 async fn connect_storage(cfg: &StorageConfig) -> anyhow::Result<Arc<dyn StorageAdapter>> {
     match cfg {
         StorageConfig::Filesystem { path } => {
@@ -204,8 +205,22 @@ async fn connect_storage(cfg: &StorageConfig) -> anyhow::Result<Arc<dyn StorageA
             .with_context(|| format!("initialising s3 storage for bucket {bucket:?}"))?;
             Ok(Arc::new(adapter))
         }
-        StorageConfig::Gcs { .. } => anyhow::bail!(
-            "STORAGE_DRIVER=gcs is not yet implemented; use STORAGE_DRIVER=filesystem or s3"
-        ),
+        StorageConfig::Gcs {
+            bucket,
+            service_account_key,
+            endpoint,
+        } => {
+            let adapter = GcsAdapter::new(GcsConfig {
+                bucket: bucket.clone(),
+                service_account_key: service_account_key.clone(),
+                endpoint: endpoint.clone(),
+                // Production = upstream-compatible default; explicit
+                // `None` documents the choice.
+                key_prefix: None,
+            })
+            .await
+            .with_context(|| format!("initialising gcs storage for bucket {bucket:?}"))?;
+            Ok(Arc::new(adapter))
+        }
     }
 }

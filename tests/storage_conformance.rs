@@ -38,13 +38,15 @@
     clippy::too_long_first_doc_paragraph
 )]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use gha_cache_oxide::config::Secret;
 use gha_cache_oxide::storage::{
-    ByteStream, FilesystemAdapter, S3Adapter, S3Config, StorageAdapter, StorageError,
+    ByteStream, FilesystemAdapter, GcsAdapter, GcsConfig, S3Adapter, S3Config, StorageAdapter,
+    StorageError,
 };
 use tempfile::TempDir;
 use url::Url;
@@ -114,6 +116,51 @@ async fn s3_setup() -> SetupResult {
         endpoint_url: Some(Url::parse(&endpoint).unwrap()),
         access_key_id: Some(access_key),
         secret_access_key: Some(Secret::new(secret_key)),
+        key_prefix: Some(key_prefix),
+    })
+    .await
+    .unwrap();
+
+    let arc: Arc<dyn StorageAdapter> = Arc::new(adapter);
+    (arc, Box::new(()), true)
+}
+
+/// GCS setup for the conformance suite. Reads connection details from
+/// env so the same adapter can run against `fake-gcs-server` in CI or a
+/// live GCS bucket in a parity sweep.
+///
+/// # Required env
+/// - `GCS_TEST_ENDPOINT` — URL of the GCS-compatible server
+///   (`http://localhost:4443` for `fake-gcs-server`).
+/// - `GCS_TEST_SA_KEY` — path to a service-account JSON file. Must
+///   contain a parseable RSA private key for the `signed_url` scenario;
+///   `fake-gcs-server` does not validate signatures, but `object_store`'s
+///   signer needs a real key to construct one.
+///
+/// # Optional env (with defaults)
+/// - `GCS_TEST_BUCKET` (default `gha-cache-test`) — must exist; tests
+///   `clear()` it before each scenario.
+///
+/// # Panics
+/// Panics (which fails the test) when `GCS_TEST_ENDPOINT` is absent — the
+/// tests that call this are `#[ignore]`'d so a default `cargo test`
+/// never reaches this path.
+async fn gcs_setup() -> SetupResult {
+    let endpoint = std::env::var("GCS_TEST_ENDPOINT").expect(
+        "GCS_TEST_ENDPOINT must be set; start fake-gcs-server and re-run `cargo test -- --ignored`",
+    );
+    let bucket = std::env::var("GCS_TEST_BUCKET").unwrap_or_else(|_| "gha-cache-test".to_string());
+    let sa_key = std::env::var("GCS_TEST_SA_KEY").ok().map(PathBuf::from);
+
+    // Each test gets its own top-level prefix inside the shared bucket
+    // so `cargo test` can run scenarios in parallel without them
+    // clobbering each other's uploads/deletes/clears.
+    let key_prefix = format!("test-{}", uuid::Uuid::new_v4());
+
+    let adapter = GcsAdapter::new(GcsConfig {
+        bucket,
+        service_account_key: sa_key,
+        endpoint: Some(Url::parse(&endpoint).unwrap()),
         key_prefix: Some(key_prefix),
     })
     .await
@@ -573,6 +620,29 @@ storage_conformance_cases!(
     rejects_empty_object_name,
 );
 
+storage_conformance_cases!(
+    gcs,
+    gcs_setup,
+    ignore: "requires GCS_TEST_ENDPOINT + running fake-gcs-server; `cargo test -- --ignored`",
+    round_trip_zero_bytes,
+    round_trip_small_payload,
+    round_trip_crosses_buffer_flush,
+    download_missing_returns_object_not_found,
+    upload_rejects_directory_traversal,
+    download_rejects_absolute_path,
+    count_files_in_missing_folder_returns_zero,
+    count_files_counts_uploaded_files,
+    delete_folder_removes_all_children,
+    delete_missing_folder_is_noop,
+    delete_folder_is_recursive,
+    clear_removes_everything,
+    upload_overwrites_existing_object,
+    prefix_matching_is_segment_aware,
+    signed_url_matches_capability,
+    signed_url_validates_object_name,
+    rejects_empty_object_name,
+);
+
 // ------------------------------------------------------------------------
 // Smoke tests for the programmatic runner — exercise the same scenarios
 // in sequence against both drivers. Filesystem always runs; S3 is
@@ -589,5 +659,12 @@ async fn runner_executes_full_suite_against_filesystem() {
 #[ignore = "requires S3_TEST_ENDPOINT + running MinIO; `cargo test -- --ignored`"]
 async fn runner_executes_full_suite_against_s3() {
     let (adapter, _guard, signs_urls) = s3_setup().await;
+    run_conformance_suite(adapter, signs_urls).await;
+}
+
+#[tokio::test]
+#[ignore = "requires GCS_TEST_ENDPOINT + running fake-gcs-server; `cargo test -- --ignored`"]
+async fn runner_executes_full_suite_against_gcs() {
+    let (adapter, _guard, signs_urls) = gcs_setup().await;
     run_conformance_suite(adapter, signs_urls).await;
 }
