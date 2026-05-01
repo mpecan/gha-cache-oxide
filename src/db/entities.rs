@@ -11,9 +11,10 @@
 //! parses the same response shape.
 
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// One row in `cache_entries`.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ToSchema)]
 pub struct CacheEntry {
     pub id: String,
     pub key: String,
@@ -31,7 +32,7 @@ pub struct CacheEntry {
 }
 
 /// One row in `storage_locations`.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, ToSchema)]
 pub struct StorageLocation {
     pub id: String,
     #[sqlx(rename = "folderName")]
@@ -121,8 +122,12 @@ pub struct NewUpload<'a> {
 ///
 /// Mirrors upstream's four-valued `type` field in
 /// `lib/storage.ts#matchCacheEntry` so the caller can surface the same
-/// distinction back to `actions/cache`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// distinction back to `actions/cache`. Serialised as kebab-case
+/// (`exact-primary`, `prefixed-primary`, `exact-restore`,
+/// `prefixed-restore`) — matches upstream's wire shape at
+/// `lib/api/cache-entries.ts:60`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
 pub enum MatchType {
     /// `key = primaryKey` on the first scope to yield a hit.
     ExactPrimary,

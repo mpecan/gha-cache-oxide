@@ -9,9 +9,24 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Json, Response};
 
 use crate::db::id::now_ms;
+use crate::routes::errors::ErrorBody;
 use crate::state::AppState;
 use crate::tasks::cleanup;
+use crate::tasks::cleanup::CleanupReport;
 
+#[utoipa::path(
+    post,
+    path = "/cleanup/trigger",
+    tag = "cleanup",
+    summary = "Run cleanup pass",
+    description = "Runs the same cleanup pass the background scheduler runs on its cadence; returns the per-task counts.",
+    responses(
+        (status = 200, description = "Per-task cleanup counts", body = CleanupReport),
+        (status = 401, body = ErrorBody),
+        (status = 501, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn trigger(State(state): State<AppState>) -> Response {
     let report = cleanup::run_all(
         &*state.db,

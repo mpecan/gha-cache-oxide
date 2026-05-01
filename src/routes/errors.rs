@@ -10,7 +10,23 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
 use serde_json::json;
+use utoipa::ToSchema;
+
+/// Error response body shape — matches `error_response`'s emitted JSON.
+/// Exposed as a typed struct (rather than purely `json!`) so `OpenAPI`
+/// can document it; the response builders in this module stay on the
+/// macro path so the diff is small.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorBody {
+    /// HTTP status code, repeated in the body for clients that read
+    /// it from JSON (matches upstream h3 `createError`).
+    #[serde(rename = "statusCode")]
+    pub status_code: u16,
+    /// Human-readable error message.
+    pub message: String,
+}
 
 /// Builds a response with the `{statusCode, message}` body.
 pub fn error_response(status: StatusCode, message: &str) -> Response {

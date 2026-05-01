@@ -123,6 +123,42 @@ GitHub Actions client. The whole sub-router is gated by
 | `GET`  | `/management/storage-locations/{id}` | Single-location fetch. Returns the row body or 404. |
 | `DELETE` | `/management/storage-locations/{id}` | Removes the row and its underlying folder. Returns 204; 404 if the row is already gone. |
 | `POST` | `/management/cleanup/trigger`    | Runs one cleanup pass synchronously and returns the per-task counts as JSON. |
+| `GET`  | `/management/_docs/spec.json`    | OpenAPI 3.1 spec describing the surface above. Auth-gated like every other route. |
+
+A committed snapshot of the spec lives at `docs/openapi.json` so
+operators can pre-fetch it without authenticating; a no-drift
+integration test pins it against the live endpoint, regenerated via
+`OPENAPI_REGENERATE=1 cargo test --test management spec_snapshot_matches_committed_file`.
+
+### oRPC `_rpc` surface (#77 part 2)
+
+For SDK compatibility, an oRPC-shaped wire surface is mounted at
+`/management-api/_rpc/...`. Seven procedures are exposed at upstream's
+URLs (`cacheEntries/{findMany,get,match,delete,deleteMany}`,
+`storageLocations/{get,delete}`), authed by `X-Api-Key:
+<MANAGEMENT_API_KEY>` (matching upstream's `lib/api/base.ts`
+middleware). Each procedure accepts a `POST` body of the form
+`{"json": <input>, "meta"?: ...}` and returns
+`{"json": <output>}` on success or `{"json": <error>}` with a
+mapped HTTP status on failure (the error body matches
+`@orpc/client`'s `ORPCErrorJSON` shape — `{defined, code, status, message}`).
+
+The upstream TypeScript SDK at
+[`sdk/index.ts`](https://github.com/falcondev-oss/github-actions-cache-server/blob/main/sdk/index.ts)
+should work against this server unchanged. A few caveats:
+
+- The wire-format fixtures are pinned by `tests/management/rpc.rs`
+  but not by an end-to-end SDK round-trip in CI — a future orpc
+  release that changes the envelope shape (`{json, meta}`,
+  `ORPCErrorJSON`) could break compatibility silently.
+- We don't implement orpc's JS-special-type round-tripping (`Date`,
+  `BigInt`, `Map`, `Set`, `undefined`, `NaN`, `±Infinity`, `RegExp`,
+  `URL`, `Blob`). The management API only round-trips plain
+  JSON-safe types so this hasn't surfaced; `meta` arrays in incoming
+  requests are tolerated and ignored.
+- The `CORSPlugin` and `onError` interceptors in upstream's
+  `_rpc.ts` are not ported (CORS is a deployment concern; logging is
+  already handled by `tracing`).
 
 Auth behaviour:
 
@@ -157,7 +193,7 @@ diverges:
    operators can verify the filter caught what they expected.
 7. `findMany` filter accepts `scope` / `repoId` only, not `key` / `version` —
    open a follow-up issue if you need finer-grained list filtering.
-8. No OpenAPI spec or oRPC `_rpc` surface yet — tracked separately as #77.
+8. OpenAPI spec is served at `/management/_docs/spec.json` (#77 part 1) AND an oRPC `_rpc` wire-format surface is mounted at `/management-api/_rpc/...` so the upstream TypeScript SDK works unchanged (#77 part 2). See "Management API" §§"oRPC `_rpc` surface" for the wire-format contract and parity caveats.
 
 The wire shape of `cache_entries` / `storage_locations` rows themselves
 matches upstream verbatim (camelCase keys), so scripts that decode either

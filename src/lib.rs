@@ -74,10 +74,17 @@ pub fn build_app(state: AppState) -> Router {
     // the capability, matching upstream's routing topology.
     let blob = routes::blob::router();
     let management = routes::management::router(state.clone());
+    // oRPC `_rpc` wire-format adapter (issue #77 part 2). Mounted at
+    // upstream's `/management-api/_rpc` base path so the upstream
+    // TypeScript SDK works unchanged. `X-Api-Key` middleware is
+    // applied inside the sub-router (different from the management
+    // REST surface's Bearer auth).
+    let management_rpc = routes::management::rpc::router(state.clone());
     Router::new()
         .route("/health", get(routes::health::handler))
         .nest("/twirp/github.actions.results.api.v1.CacheService", twirp)
         .nest("/management", management)
+        .nest("/management-api/_rpc", management_rpc)
         .merge(blob)
         // Catch-all proxy to `DEFAULT_ACTIONS_RESULTS_URL` (issue #24,
         // ports upstream `routes/[...path].ts`). Runs only for requests

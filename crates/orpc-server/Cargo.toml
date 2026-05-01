@@ -1,0 +1,32 @@
+[package]
+name = "orpc-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+repository = "https://github.com/mpecan/gha-cache-oxide"
+description = "Server-side adapter for the oRPC wire format (https://orpc.unnoq.com), built on axum. Reverse-engineered from @orpc/server@1.x."
+readme = "README.md"
+
+[lib]
+name = "orpc_server"
+path = "src/lib.rs"
+
+[dependencies]
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
