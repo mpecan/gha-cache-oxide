@@ -47,6 +47,8 @@ mod cache_entries;
 mod cleanup;
 mod openapi;
 mod pagination;
+pub(crate) mod rpc;
+mod rpc_preprocess;
 mod storage_locations;
 
 use axum::Router;

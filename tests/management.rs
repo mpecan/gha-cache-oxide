@@ -23,5 +23,14 @@ mod delete_many;
 mod match_endpoint;
 #[path = "management/openapi.rs"]
 mod openapi;
+#[path = "management/rpc_common.rs"]
+mod rpc_common;
+
+#[path = "management/rpc_auth.rs"]
+mod rpc_auth;
+#[path = "management/rpc_cache_entries.rs"]
+mod rpc_cache_entries;
+#[path = "management/rpc_storage_locations.rs"]
+mod rpc_storage_locations;
 #[path = "management/storage_locations.rs"]
 mod storage_locations;
