@@ -45,6 +45,7 @@
 mod auth;
 mod cache_entries;
 mod cleanup;
+mod openapi;
 mod pagination;
 mod storage_locations;
 
@@ -73,6 +74,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(storage_locations::get_one).delete(storage_locations::delete_one),
         )
         .route("/cleanup/trigger", post(cleanup::trigger))
+        .route("/_docs/spec.json", get(openapi::spec_json))
         .layer(axum_mw::from_fn_with_state(
             state,
             auth::require_management_key,

@@ -34,6 +34,7 @@
 
 use serde::Serialize;
 use tokio::task::JoinHandle;
+use utoipa::ToSchema;
 
 use crate::db::Db;
 use crate::storage::StorageAdapter;
@@ -57,7 +58,7 @@ pub use scheduler::{
 /// Serialised as the JSON body of the `POST /management/cleanup/trigger`
 /// endpoint (issue #19), which is why the fields stay `pub` and the
 /// derive includes `Serialize`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 pub struct CleanupReport {
     pub merges_reset: u64,
     pub uploads_deleted: u64,

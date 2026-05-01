@@ -21,5 +21,7 @@ mod cleanup;
 mod delete_many;
 #[path = "management/match_endpoint.rs"]
 mod match_endpoint;
+#[path = "management/openapi.rs"]
+mod openapi;
 #[path = "management/storage_locations.rs"]
 mod storage_locations;

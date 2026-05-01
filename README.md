@@ -123,6 +123,12 @@ GitHub Actions client. The whole sub-router is gated by
 | `GET`  | `/management/storage-locations/{id}` | Single-location fetch. Returns the row body or 404. |
 | `DELETE` | `/management/storage-locations/{id}` | Removes the row and its underlying folder. Returns 204; 404 if the row is already gone. |
 | `POST` | `/management/cleanup/trigger`    | Runs one cleanup pass synchronously and returns the per-task counts as JSON. |
+| `GET`  | `/management/_docs/spec.json`    | OpenAPI 3.1 spec describing the surface above. Auth-gated like every other route. |
+
+A committed snapshot of the spec lives at `docs/openapi.json` so
+operators can pre-fetch it without authenticating; a no-drift
+integration test pins it against the live endpoint, regenerated via
+`OPENAPI_REGENERATE=1 cargo test --test management spec_snapshot_matches_committed_file`.
 
 Auth behaviour:
 
@@ -157,7 +163,7 @@ diverges:
    operators can verify the filter caught what they expected.
 7. `findMany` filter accepts `scope` / `repoId` only, not `key` / `version` —
    open a follow-up issue if you need finer-grained list filtering.
-8. No OpenAPI spec or oRPC `_rpc` surface yet — tracked separately as #77.
+8. OpenAPI spec is served at `/management/_docs/spec.json` (#77 part 1). An oRPC `_rpc` wire-format surface compatible with the upstream TypeScript SDK is tracked as #77 part 2 (in flight on the same PR).
 
 The wire shape of `cache_entries` / `storage_locations` rows themselves
 matches upstream verbatim (camelCase keys), so scripts that decode either

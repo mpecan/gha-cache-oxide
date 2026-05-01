@@ -4,15 +4,16 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::db::entities::StorageLocation;
-use crate::routes::errors::{internal_error, not_found};
+use crate::routes::errors::{ErrorBody, internal_error, not_found};
 use crate::state::AppState;
 
 use super::pagination::{Page, PageQuery};
 
-#[derive(Debug, Serialize)]
-struct ListBody {
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct ListBody {
     total: i64,
     items: Vec<StorageLocation>,
     page: u32,
@@ -20,6 +21,23 @@ struct ListBody {
     items_per_page: u32,
 }
 
+#[utoipa::path(
+    get,
+    path = "/storage-locations",
+    tag = "storage-locations",
+    summary = "List storage locations",
+    description = "Paginated list of storage_locations rows.",
+    params(
+        ("page" = Option<u32>, Query, description = "1-based page number (default 1)"),
+        ("itemsPerPage" = Option<u32>, Query, description = "Page size (default 100, max 500)"),
+    ),
+    responses(
+        (status = 200, description = "Page of storage locations", body = ListBody),
+        (status = 401, description = "Missing or invalid Bearer token", body = ErrorBody),
+        (status = 501, description = "MANAGEMENT_API_KEY env var unset", body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn list(
     State(state): State<AppState>,
     Query(query): Query<PageQuery>,
@@ -51,6 +69,20 @@ pub(super) async fn list(
 
 /// `GET /management/storage-locations/{id}` — single-location fetch.
 /// Returns `200` with the row body or `404` if missing.
+#[utoipa::path(
+    get,
+    path = "/storage-locations/{id}",
+    tag = "storage-locations",
+    summary = "Get storage location",
+    params(("id" = String, Path, description = "Storage location id")),
+    responses(
+        (status = 200, description = "The storage location", body = StorageLocation),
+        (status = 401, body = ErrorBody),
+        (status = 404, description = "No row matched", body = ErrorBody),
+        (status = 501, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.db.find_storage_location_by_id(&id).await {
         Ok(Some(loc)) => Json(loc).into_response(),
@@ -73,6 +105,21 @@ pub(super) async fn get_one(State(state): State<AppState>, Path(id): Path<String
 ///
 /// Returns `204 No Content` on success, `404 Not Found` if no row
 /// matched the supplied id.
+#[utoipa::path(
+    delete,
+    path = "/storage-locations/{id}",
+    tag = "storage-locations",
+    summary = "Delete storage location",
+    description = "Removes the storage_locations row (cascading to any cache_entries pointing at it) and best-effort deletes the underlying blob folder.",
+    params(("id" = String, Path, description = "Storage location id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 401, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 501, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn delete_one(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let location = match state.db.find_storage_location_by_id(&id).await {
         Ok(Some(l)) => l,

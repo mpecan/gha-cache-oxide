@@ -5,27 +5,35 @@ use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::db::entities::{CacheEntry, CacheEntryFilter, MatchRequest, MatchType};
-use crate::routes::errors::{bad_request, internal_error, not_found};
+use crate::routes::errors::{ErrorBody, bad_request, internal_error, not_found};
 use crate::state::AppState;
 
 use super::pagination::{Page, PageQuery};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub(super) struct ListQuery {
+    /// Cache scope filter (e.g. `refs/heads/main`).
     #[serde(default)]
     pub scope: Option<String>,
+    /// Repository id filter (matches the `repoId` column).
     #[serde(default, rename = "repoId")]
+    #[param(rename = "repoId")]
     pub repo_id: Option<String>,
+    /// 1-based page number (default 1).
     #[serde(default)]
     pub page: Option<u32>,
+    /// Page size (default 100, max 500).
     #[serde(default, rename = "itemsPerPage")]
+    #[param(rename = "itemsPerPage")]
     pub items_per_page: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
-struct ListBody {
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct ListBody {
     total: i64,
     items: Vec<CacheEntry>,
     page: u32,
@@ -34,6 +42,19 @@ struct ListBody {
 }
 
 /// `GET /management/cache-entries` — paginated list.
+#[utoipa::path(
+    get,
+    path = "/cache-entries",
+    tag = "cache-entries",
+    summary = "List cache entries",
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Page of cache entries", body = ListBody),
+        (status = 401, body = ErrorBody),
+        (status = 501, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
@@ -88,6 +109,21 @@ pub(super) async fn list(
 /// adapter call is best-effort cleanup, and the operator can re-run
 /// `POST /management/cleanup/trigger` to retry the orphan-folder reap
 /// (cleanup:locations does the same `delete_folder` call).
+#[utoipa::path(
+    delete,
+    path = "/cache-entries/{id}",
+    tag = "cache-entries",
+    summary = "Delete cache entry",
+    description = "Removes the cache entry, its backing storage location row, and the folder on the storage adapter.",
+    params(("id" = String, Path, description = "Cache entry id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 401, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 501, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let location = match state.db.find_location_for_entry(&id).await {
         Ok(Some(l)) => l,
@@ -138,6 +174,20 @@ pub(super) async fn delete(State(state): State<AppState>, Path(id): Path<String>
 /// `match_endpoint` even when an entry happened to have the literal id
 /// "match". A test pin in `tests/management.rs` guards this routing
 /// invariant.
+#[utoipa::path(
+    get,
+    path = "/cache-entries/{id}",
+    tag = "cache-entries",
+    summary = "Get cache entry",
+    params(("id" = String, Path, description = "Cache entry id")),
+    responses(
+        (status = 200, description = "The cache entry", body = CacheEntry),
+        (status = 401, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 501, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.db.find_cache_entry_by_id(&id).await {
         Ok(Some(entry)) => Json(entry).into_response(),
@@ -146,12 +196,14 @@ pub(super) async fn get_one(State(state): State<AppState>, Path(id): Path<String
     }
 }
 
-#[derive(Debug, Serialize)]
-struct MatchResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct MatchResponse {
+    /// The matched cache entry.
     #[serde(rename = "match")]
     match_field: CacheEntry,
+    /// How the match was made (kebab-case `MatchType`).
     #[serde(rename = "type")]
-    type_field: &'static str,
+    type_field: MatchType,
 }
 
 /// `GET /management/cache-entries/match` — runs the same algorithm
@@ -171,6 +223,28 @@ struct MatchResponse {
 /// is interpreted as a one-element array, mirroring upstream's
 /// `(val) => Array.isArray(val) ? val : [val]` preprocess at
 /// `lib/api/cache-entries.ts:46`.
+#[utoipa::path(
+    get,
+    path = "/cache-entries/match",
+    tag = "cache-entries",
+    summary = "Match cache entry",
+    description = "Find the best matching cache entry using the primary key and optional restore keys across the given scopes. Returns the matched entry along with the match type, or 404 if no match is found.",
+    params(
+        ("primaryKey" = String, Query, description = "Primary cache key to match against"),
+        ("version" = String, Query, description = "Cache version identifier"),
+        ("repoId" = String, Query, description = "Repository id to match against"),
+        ("scopes" = Vec<String>, Query, description = "Scopes to search within, checked in order"),
+        ("restoreKeys" = Option<Vec<String>>, Query, description = "Optional fallback keys to try if the primary key does not match"),
+    ),
+    responses(
+        (status = 200, description = "Best match", body = MatchResponse),
+        (status = 400, body = ErrorBody),
+        (status = 401, body = ErrorBody),
+        (status = 404, description = "No matching cache entry", body = ErrorBody),
+        (status = 501, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn match_endpoint(
     State(state): State<AppState>,
     RawQuery(raw): RawQuery,
@@ -194,7 +268,7 @@ pub(super) async fn match_endpoint(
     match state.db.match_cache_entry(req).await {
         Ok(Some(matched)) => Json(MatchResponse {
             match_field: matched.entry,
-            type_field: match_type_kebab(matched.match_type),
+            type_field: matched.match_type,
         })
         .into_response(),
         // Divergence: upstream returns `200 OK` with body `null` when
@@ -206,17 +280,6 @@ pub(super) async fn match_endpoint(
         // the standard `{statusCode, message}` shape.
         Ok(None) => not_found("No matching cache entry"),
         Err(e) => internal_error(&e.to_string()),
-    }
-}
-
-/// Maps [`MatchType`] to the upstream-compatible kebab-case enum
-/// strings (`lib/api/cache-entries.ts:60`).
-const fn match_type_kebab(t: MatchType) -> &'static str {
-    match t {
-        MatchType::ExactPrimary => "exact-primary",
-        MatchType::PrefixedPrimary => "prefixed-primary",
-        MatchType::ExactRestore => "exact-restore",
-        MatchType::PrefixedRestore => "prefixed-restore",
     }
 }
 
@@ -267,21 +330,27 @@ fn parse_match_params(raw: &str) -> Result<MatchParams, &'static str> {
     })
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, IntoParams)]
 #[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
 pub(super) struct DeleteManyQuery {
+    /// Match cache entries with this `key`.
     #[serde(default)]
     pub key: Option<String>,
+    /// Match cache entries with this `version`.
     #[serde(default)]
     pub version: Option<String>,
+    /// Match cache entries with this `scope`.
     #[serde(default)]
     pub scope: Option<String>,
+    /// Match cache entries with this `repoId`.
     #[serde(default)]
     pub repo_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct DeleteManyResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct DeleteManyResponse {
+    /// Number of cache entries deleted.
     deleted: u64,
 }
 
@@ -308,6 +377,21 @@ struct DeleteManyResponse {
 ///
 /// Honours `repoId` — divergent from upstream `deleteMany` which
 /// silently drops the filter (`lib/api/cache-entries.ts:163-168`).
+#[utoipa::path(
+    delete,
+    path = "/cache-entries",
+    tag = "cache-entries",
+    summary = "Bulk delete cache entries",
+    description = "Delete cache entries matching at least one of the supplied filters. Empty filter (all four unset) returns 400 — protects against accidental wipe.",
+    params(DeleteManyQuery),
+    responses(
+        (status = 200, description = "Number of rows deleted", body = DeleteManyResponse),
+        (status = 400, description = "All filters were unset", body = ErrorBody),
+        (status = 401, body = ErrorBody),
+        (status = 501, body = ErrorBody),
+    ),
+    security(("bearer" = []))
+)]
 pub(super) async fn delete_many(
     State(state): State<AppState>,
     Query(query): Query<DeleteManyQuery>,

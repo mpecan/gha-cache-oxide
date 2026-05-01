@@ -1,0 +1,933 @@
+{
+  "components": {
+    "schemas": {
+      "CacheEntry": {
+        "description": "One row in `cache_entries`.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "locationId": {
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "version",
+          "scope",
+          "repoId",
+          "updatedAt",
+          "locationId"
+        ],
+        "type": "object"
+      },
+      "CleanupReport": {
+        "description": "Per-task counts produced by a single [`run_all`] pass. Logged at\n`info` after every cycle so operators can see what was reaped.\n\nSerialised as the JSON body of the `POST /management/cleanup/trigger`\nendpoint (issue #19), which is why the fields stay `pub` and the\nderive includes `Serialize`.",
+        "properties": {
+          "entries_deleted": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "locations_deleted": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "merges_reset": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "parts_deleted": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uploads_deleted": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "merges_reset",
+          "uploads_deleted",
+          "parts_deleted",
+          "entries_deleted",
+          "locations_deleted"
+        ],
+        "type": "object"
+      },
+      "DeleteManyResponse": {
+        "properties": {
+          "deleted": {
+            "description": "Number of cache entries deleted.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "type": "object"
+      },
+      "ErrorBody": {
+        "description": "Error response body shape — matches `error_response`'s emitted JSON.\nExposed as a typed struct (rather than purely `json!`) so `OpenAPI`\ncan document it; the response builders in this module stay on the\nmacro path so the diff is small.",
+        "properties": {
+          "message": {
+            "description": "Human-readable error message.",
+            "type": "string"
+          },
+          "statusCode": {
+            "description": "HTTP status code, repeated in the body for clients that read\nit from JSON (matches upstream h3 `createError`).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "statusCode",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ListBody": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/StorageLocation"
+            },
+            "type": "array"
+          },
+          "itemsPerPage": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "page": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "items",
+          "page",
+          "itemsPerPage"
+        ],
+        "type": "object"
+      },
+      "MatchResponse": {
+        "properties": {
+          "match": {
+            "$ref": "#/components/schemas/CacheEntry",
+            "description": "The matched cache entry."
+          },
+          "type": {
+            "$ref": "#/components/schemas/MatchType",
+            "description": "How the match was made (kebab-case `MatchType`)."
+          }
+        },
+        "required": [
+          "match",
+          "type"
+        ],
+        "type": "object"
+      },
+      "MatchType": {
+        "description": "Classifies how a `cache_entries` row was matched.\n\nMirrors upstream's four-valued `type` field in\n`lib/storage.ts#matchCacheEntry` so the caller can surface the same\ndistinction back to `actions/cache`. Serialised as kebab-case\n(`exact-primary`, `prefixed-primary`, `exact-restore`,\n`prefixed-restore`) — matches upstream's wire shape at\n`lib/api/cache-entries.ts:60`.",
+        "enum": [
+          "exact-primary",
+          "prefixed-primary",
+          "exact-restore",
+          "prefixed-restore"
+        ],
+        "type": "string"
+      },
+      "StorageLocation": {
+        "description": "One row in `storage_locations`.",
+        "properties": {
+          "folderName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "lastDownloadedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mergeStartedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mergedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "partCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "partsDeletedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "folderName",
+          "partCount"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "description": "Bearer token equal to the server's `MANAGEMENT_API_KEY`.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Operator-facing REST surface for the gha-cache-oxide cache server. All endpoints require an `Authorization: Bearer <MANAGEMENT_API_KEY>` header.",
+    "license": {
+      "identifier": "MIT",
+      "name": "MIT"
+    },
+    "title": "gha-cache-oxide management API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/cache-entries": {
+      "delete": {
+        "description": "Delete cache entries matching at least one of the supplied filters. Empty filter (all four unset) returns 400 — protects against accidental wipe.",
+        "operationId": "delete_many",
+        "parameters": [
+          {
+            "description": "Match cache entries with this `key`.",
+            "in": "query",
+            "name": "key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Match cache entries with this `version`.",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Match cache entries with this `scope`.",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Match cache entries with this `repoId`.",
+            "in": "query",
+            "name": "repoId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteManyResponse"
+                }
+              }
+            },
+            "description": "Number of rows deleted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "All filters were unset"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Bulk delete cache entries",
+        "tags": [
+          "cache-entries"
+        ]
+      },
+      "get": {
+        "operationId": "list",
+        "parameters": [
+          {
+            "description": "Cache scope filter (e.g. `refs/heads/main`).",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repository id filter (matches the `repoId` column).",
+            "in": "query",
+            "name": "repoId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "1-based page number (default 1).",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Page size (default 100, max 500).",
+            "in": "query",
+            "name": "itemsPerPage",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBody"
+                }
+              }
+            },
+            "description": "Page of cache entries"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "List cache entries",
+        "tags": [
+          "cache-entries"
+        ]
+      }
+    },
+    "/cache-entries/match": {
+      "get": {
+        "description": "Find the best matching cache entry using the primary key and optional restore keys across the given scopes. Returns the matched entry along with the match type, or 404 if no match is found.",
+        "operationId": "match_endpoint",
+        "parameters": [
+          {
+            "description": "Primary cache key to match against",
+            "in": "query",
+            "name": "primaryKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Cache version identifier",
+            "in": "query",
+            "name": "version",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repository id to match against",
+            "in": "query",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Scopes to search within, checked in order",
+            "in": "query",
+            "name": "scopes",
+            "required": true,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "description": "Optional fallback keys to try if the primary key does not match",
+            "in": "query",
+            "name": "restoreKeys",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchResponse"
+                }
+              }
+            },
+            "description": "Best match"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No matching cache entry"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Match cache entry",
+        "tags": [
+          "cache-entries"
+        ]
+      }
+    },
+    "/cache-entries/{id}": {
+      "delete": {
+        "description": "Removes the cache entry, its backing storage location row, and the folder on the storage adapter.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "description": "Cache entry id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete cache entry",
+        "tags": [
+          "cache-entries"
+        ]
+      },
+      "get": {
+        "description": "Note: the literal-segment route `GET /cache-entries/match` is\nregistered alongside this one. axum (matchit-based) prefers literal\nsegments over `{id}` params, so `/match` always reaches\n`match_endpoint` even when an entry happened to have the literal id\n\"match\". A test pin in `tests/management.rs` guards this routing\ninvariant.",
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "description": "Cache entry id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheEntry"
+                }
+              }
+            },
+            "description": "The cache entry"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Get cache entry",
+        "tags": [
+          "cache-entries"
+        ]
+      }
+    },
+    "/cleanup/trigger": {
+      "post": {
+        "description": "Runs the same cleanup pass the background scheduler runs on its cadence; returns the per-task counts.",
+        "operationId": "trigger",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupReport"
+                }
+              }
+            },
+            "description": "Per-task cleanup counts"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Run cleanup pass",
+        "tags": [
+          "cleanup"
+        ]
+      }
+    },
+    "/storage-locations": {
+      "get": {
+        "description": "Paginated list of storage_locations rows.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "description": "1-based page number (default 1)",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Page size (default 100, max 500)",
+            "in": "query",
+            "name": "itemsPerPage",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBody"
+                }
+              }
+            },
+            "description": "Page of storage locations"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing or invalid Bearer token"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "MANAGEMENT_API_KEY env var unset"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "List storage locations",
+        "tags": [
+          "storage-locations"
+        ]
+      }
+    },
+    "/storage-locations/{id}": {
+      "delete": {
+        "description": "Removes the storage_locations row (cascading to any cache_entries pointing at it) and best-effort deletes the underlying blob folder.",
+        "operationId": "delete_one",
+        "parameters": [
+          {
+            "description": "Storage location id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Delete storage location",
+        "tags": [
+          "storage-locations"
+        ]
+      },
+      "get": {
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "description": "Storage location id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageLocation"
+                }
+              }
+            },
+            "description": "The storage location"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "No row matched"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Get storage location",
+        "tags": [
+          "storage-locations"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Management API root",
+      "url": "/management"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Cache entry inspection + deletion",
+      "name": "cache-entries"
+    },
+    {
+      "description": "Storage location inspection + orphan removal",
+      "name": "storage-locations"
+    },
+    {
+      "description": "Background cleanup orchestration",
+      "name": "cleanup"
+    }
+  ]
+}
