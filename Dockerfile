@@ -40,6 +40,11 @@ COPY migrations ./migrations
 # parses every declared target during ANY build (even `--bin <name>`),
 # so the file must exist on disk or the manifest fails to parse.
 COPY benches ./benches
+# Workspace member `orpc-server` (#77 Phase B refactor). The root
+# Cargo.toml's `[workspace] members = ["crates/orpc-server"]` line
+# triggers manifest resolution at parse time, so the sub-crate's
+# `Cargo.toml` must be present even for a bin-only build.
+COPY crates ./crates
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \

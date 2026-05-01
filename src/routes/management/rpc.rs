@@ -31,10 +31,12 @@
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{HeaderName, StatusCode};
+use axum::http::HeaderName;
 use axum::middleware::{self as axum_mw, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::post;
+use orpc_server::preprocess::{one_or_many, one_or_many_opt};
+use orpc_server::{RpcErr, RpcRequest, ok};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -42,117 +44,8 @@ use crate::db::entities::{CacheEntryFilter, MatchRequest};
 use crate::state::AppState;
 
 use super::pagination::PageQuery;
-use super::rpc_preprocess::{deserialize_one_or_many, deserialize_one_or_many_opt};
 
 const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
-
-// ---- envelope types -----------------------------------------------------
-
-/// Inbound request envelope. `meta` is parsed permissively (we accept
-/// an optional array of any-typed entries) but ignored — we never use
-/// JS-specific encodings on the request side.
-#[derive(Debug, Deserialize)]
-pub(super) struct RpcRequest<T> {
-    pub json: T,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub meta: Option<Value>,
-}
-
-/// Outbound success envelope. Always `{"json": <T>}`; we never emit
-/// `meta` because the management API only round-trips JSON-safe types.
-#[derive(Debug, Serialize)]
-struct RpcSuccess<T>
-where
-    T: Serialize,
-{
-    json: T,
-}
-
-/// Outbound error body — the inner shape that goes into
-/// `{"json": <RpcErrorBody>}`. Matches the upstream `ORPCErrorJSON`
-/// shape exactly (`{defined, code, status, message, data?}`).
-#[derive(Debug, Serialize)]
-struct RpcErrorBody {
-    /// `false` for unhandled / framework-level errors; `true` only
-    /// when an error was declared by the procedure (we never declare
-    /// any, so this is always `false`).
-    defined: bool,
-    /// Upstream-compat code from `COMMON_ORPC_ERROR_DEFS`
-    /// (`NOT_FOUND`, `BAD_REQUEST`, etc.).
-    code: &'static str,
-    /// HTTP status that mirrors the body's status — repeated so
-    /// clients can decode errors from the body alone (matches
-    /// upstream's wire shape).
-    status: u16,
-    /// Human-readable message.
-    message: String,
-}
-
-/// Maps an internal failure to a `(HTTP status, ORPC code, message)` triple.
-#[derive(Debug, Clone)]
-struct RpcErr {
-    status: StatusCode,
-    code: &'static str,
-    message: String,
-}
-
-impl RpcErr {
-    fn unauthorized(message: &str) -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            code: "UNAUTHORIZED",
-            message: message.to_string(),
-        }
-    }
-    fn service_unavailable(message: &str) -> Self {
-        Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "SERVICE_UNAVAILABLE",
-            message: message.to_string(),
-        }
-    }
-    fn not_found(message: &str) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            code: "NOT_FOUND",
-            message: message.to_string(),
-        }
-    }
-    fn bad_request(message: &str) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "BAD_REQUEST",
-            message: message.to_string(),
-        }
-    }
-    fn internal(message: &str) -> Self {
-        tracing::error!(message, "rpc internal error");
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "INTERNAL_SERVER_ERROR",
-            message: "Internal Server Error".to_string(),
-        }
-    }
-}
-
-impl IntoResponse for RpcErr {
-    fn into_response(self) -> Response {
-        let body = RpcSuccess {
-            json: RpcErrorBody {
-                defined: false,
-                code: self.code,
-                status: self.status.as_u16(),
-                message: self.message,
-            },
-        };
-        (self.status, Json(body)).into_response()
-    }
-}
-
-fn ok<T: Serialize>(value: T) -> Response {
-    Json(RpcSuccess { json: value }).into_response()
-}
 
 // ---- auth middleware ----------------------------------------------------
 
@@ -218,10 +111,10 @@ struct MatchInput {
     primary_key: String,
     /// Mirrors upstream's `z.preprocess((val) => Array.isArray(val) ? val : [val], ...)`
     /// — a scalar string is normalised to a one-element array.
-    #[serde(default, deserialize_with = "deserialize_one_or_many_opt")]
+    #[serde(default, deserialize_with = "one_or_many_opt")]
     restore_keys: Option<Vec<String>>,
     /// Same scalar-or-array preprocess.
-    #[serde(deserialize_with = "deserialize_one_or_many")]
+    #[serde(deserialize_with = "one_or_many")]
     scopes: Vec<String>,
     repo_id: String,
     version: String,
