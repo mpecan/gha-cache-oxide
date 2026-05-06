@@ -920,7 +920,7 @@ dependencies = [
  "object_store",
  "orpc-server",
  "proptest",
- "rand 0.9.4",
+ "rand 0.10.1",
  "reqwest",
  "rsa",
  "serde",
