@@ -126,11 +126,23 @@ pub trait Db: Send + Sync {
     /// Returns `sqlx::Error` on update failure.
     async fn increment_upload_finished(&self, id: i64, now_ms: i64) -> Result<(), sqlx::Error>;
 
-    /// Deletes an upload row.
+    /// Deletes an upload row. Returns `true` when a row was removed,
+    /// `false` when it was already gone (committed, reaped, or never
+    /// existed) — callers use this as a claim to decide who owns the
+    /// upload's blobs.
     ///
     /// # Errors
     /// Returns `sqlx::Error` on delete failure.
-    async fn delete_upload(&self, id: i64) -> Result<(), sqlx::Error>;
+    async fn delete_upload(&self, id: i64) -> Result<bool, sqlx::Error>;
+
+    /// Sets `lastPartUploadedAt` without touching the part counters.
+    /// Used by the chunked (Forgejo v1) upload path at the start and end
+    /// of every chunk so `cleanup:uploads` never reaps an upload that is
+    /// still receiving data. Returns `false` when the row is gone.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on update failure.
+    async fn touch_upload(&self, id: i64, now_ms: i64) -> Result<bool, sqlx::Error>;
 
     // ---- storage locations --------------------------------------------
 
@@ -548,11 +560,13 @@ pub trait DbTx: Send {
     /// Returns `sqlx::Error` on delete failure.
     async fn delete_storage_location(&mut self, id: &str) -> Result<(), sqlx::Error>;
 
-    /// Deletes an `uploads` row by id inside this transaction.
+    /// Deletes an `uploads` row by id inside this transaction. Returns
+    /// `true` when a row was removed; commit paths treat `false` as
+    /// "someone else already consumed this upload" and roll back.
     ///
     /// # Errors
     /// Returns `sqlx::Error` on delete failure.
-    async fn delete_upload(&mut self, id: i64) -> Result<(), sqlx::Error>;
+    async fn delete_upload(&mut self, id: i64) -> Result<bool, sqlx::Error>;
 
     /// Deletes an `uploads` row only if the staleness predicate the
     /// background `cleanup:uploads` task uses still holds at delete
