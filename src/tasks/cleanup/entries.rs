@@ -13,7 +13,13 @@
 //! NULL `lastDownloadedAt` is **not** treated as expired: the SQL
 //! `<` operator returns unknown for NULL, which matches upstream's
 //! Kysely query and means never-downloaded entries are never reaped
-//! by this task. Document divergence (none).
+//! by that pass.
+//!
+//! Opt-in second pass (not in upstream): with
+//! `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` set, never-downloaded entries
+//! committed before that window are reaped too — write-isolated PR
+//! caches and superseded keys are often saved and never restored, and
+//! would otherwise live forever. Unset, behaviour is upstream's.
 
 use crate::db::Db;
 use crate::db::entities::StorageLocation;
@@ -33,31 +39,99 @@ pub(super) fn cutoff_ms(now_ms: i64, older_than_days: u32) -> i64 {
     now_ms.saturating_sub(window_ms)
 }
 
-/// Runs one cleanup pass. Returns the number of `storage_locations`
-/// rows successfully deleted.
+/// Retention windows for `cleanup:cache-entries`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryRetention {
+    /// `CACHE_CLEANUP_OLDER_THAN_DAYS`: reap entries last downloaded
+    /// before this many days ago.
+    pub older_than_days: u32,
+    /// `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS`: if set, also reap
+    /// never-downloaded entries committed before this many days ago.
+    pub unused_older_than_days: Option<u32>,
+}
+
+impl EntryRetention {
+    pub const fn from_config(config: &crate::config::AppConfig) -> Self {
+        Self {
+            older_than_days: config.cache_cleanup_older_than_days,
+            unused_older_than_days: config.cache_cleanup_unused_older_than_days,
+        }
+    }
+}
+
+/// Which rows a pass walks.
+#[derive(Debug, Clone, Copy)]
+enum Selector {
+    /// `lastDownloadedAt < cutoff` (upstream).
+    DownloadedBefore(i64),
+    /// `lastDownloadedAt IS NULL` and committed before `cutoff`.
+    NeverDownloadedCommittedBefore(i64),
+}
+
+impl Selector {
+    async fn page(self, db: &dyn Db, offset: i64) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        match self {
+            Self::DownloadedBefore(c) => db.find_expired_locations(c, PAGE_SIZE, offset).await,
+            Self::NeverDownloadedCommittedBefore(c) => {
+                db.find_unused_locations(c, PAGE_SIZE, offset).await
+            }
+        }
+    }
+}
+
+/// Runs one cleanup pass (plus the opt-in unused pass). Returns the
+/// number of `storage_locations` rows successfully deleted.
 pub(super) async fn run(
     db: &dyn Db,
     storage: &dyn StorageAdapter,
     now_ms: i64,
-    older_than_days: u32,
+    retention: EntryRetention,
 ) -> u64 {
-    let cutoff = cutoff_ms(now_ms, older_than_days);
+    let expired = run_pass(
+        db,
+        storage,
+        Selector::DownloadedBefore(cutoff_ms(now_ms, retention.older_than_days)),
+    )
+    .await;
+    let Some(days) = retention.unused_older_than_days else {
+        return expired;
+    };
+    let unused = run_pass(
+        db,
+        storage,
+        Selector::NeverDownloadedCommittedBefore(cutoff_ms(now_ms, days)),
+    )
+    .await;
+    if unused > 0 {
+        tracing::info!(
+            count = unused,
+            unused_older_than_days = days,
+            "cleanup:entries: reaped never-downloaded entries",
+        );
+    }
+    expired + unused
+}
+
+async fn run_pass(db: &dyn Db, storage: &dyn StorageAdapter, selector: Selector) -> u64 {
     let page_size_usize = usize::try_from(PAGE_SIZE).unwrap_or(0);
     let mut deleted = 0_u64;
     let mut offset = 0_i64;
     loop {
-        let page = match db.find_expired_locations(cutoff, PAGE_SIZE, offset).await {
+        let page = match selector.page(db, offset).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(error = %e, "cleanup:entries: find_expired_locations failed");
+                tracing::warn!(error = %e, ?selector, "cleanup:entries: page query failed");
                 return deleted;
             }
         };
         let page_len = page.len();
         let mut iter_failures = 0_i64;
         for location in page {
-            match delete_one(db, storage, &location).await {
-                Ok(()) => deleted += 1,
+            match delete_one(db, storage, selector, &location).await {
+                Ok(true) => deleted += 1,
+                // Kept because it is in use now; it is no longer in the
+                // unused set, so the offset needs no adjustment.
+                Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -80,16 +154,28 @@ pub(super) async fn run(
     deleted
 }
 
+/// Deletes one location (entry cascades) and then its folder. Returns
+/// `Ok(false)` when an unused-pass row turned out to be in use by the
+/// time of the delete (a first restore raced the pass) and was kept.
 async fn delete_one(
     db: &dyn Db,
     storage: &dyn StorageAdapter,
+    selector: Selector,
     location: &StorageLocation,
-) -> Result<(), EntriesCleanupError> {
+) -> Result<bool, EntriesCleanupError> {
     let mut tx = db.begin().await?;
-    tx.delete_storage_location(&location.id).await?;
+    match selector {
+        Selector::DownloadedBefore(_) => tx.delete_storage_location(&location.id).await?,
+        Selector::NeverDownloadedCommittedBefore(_) => {
+            if !tx.delete_location_if_unused(&location.id).await? {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+    }
     tx.commit().await?;
     storage.delete_folder(&location.folder_name).await?;
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,7 +190,14 @@ enum EntriesCleanupError {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::super::test_utils::FakeStorage;
-    use super::{cutoff_ms, run};
+    use super::{EntryRetention, cutoff_ms, run};
+
+    const fn days(older_than_days: u32) -> EntryRetention {
+        EntryRetention {
+            older_than_days,
+            unused_older_than_days: None,
+        }
+    }
     use crate::db::entities::CacheEntryCoord;
     use crate::db::{Db, SqliteDb};
 
@@ -164,7 +257,7 @@ mod tests {
         db.touch_location_downloaded("loc-old", 0).await.unwrap();
         let now = 2 * 86_400_000;
 
-        let deleted = run(&db, &storage, now, 1).await;
+        let deleted = run(&db, &storage, now, days(1)).await;
 
         assert_eq!(deleted, 1);
         assert_eq!(storage.deleted_folders(), vec!["folder-old".to_string()]);
@@ -188,7 +281,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deleted = run(&db, &storage, now, 90).await;
+        let deleted = run(&db, &storage, now, days(90)).await;
 
         assert_eq!(deleted, 0);
         assert!(storage.deleted_folders().is_empty());
@@ -212,7 +305,7 @@ mod tests {
         let entry_id = seed_location(&db, "loc-x", "folder-x", "scn-x").await;
         db.touch_location_downloaded("loc-x", 0).await.unwrap();
 
-        let deleted = run(&db, &storage, 0, u32::MAX).await;
+        let deleted = run(&db, &storage, 0, days(u32::MAX)).await;
 
         assert_eq!(deleted, 0);
         assert!(storage.deleted_folders().is_empty());
@@ -228,7 +321,7 @@ mod tests {
     async fn empty_db_run_is_noop() {
         let db = fresh_db().await;
         let storage = FakeStorage::new();
-        assert_eq!(run(&db, &storage, 1_000_000_000_000, 90).await, 0);
+        assert_eq!(run(&db, &storage, 1_000_000_000_000, days(90)).await, 0);
         assert!(storage.deleted_folders().is_empty());
     }
 
@@ -243,7 +336,7 @@ mod tests {
         // No touch_location_downloaded — lastDownloadedAt stays NULL.
         let now = 1_000 * 86_400_000;
 
-        let deleted = run(&db, &storage, now, 1).await;
+        let deleted = run(&db, &storage, now, days(1)).await;
 
         assert_eq!(deleted, 0);
         assert!(storage.deleted_folders().is_empty());
@@ -253,6 +346,117 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "row with NULL lastDownloadedAt must survive (upstream parity)",
+        );
+    }
+
+    // ---- opt-in never-downloaded pass (CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS)
+
+    const DAY_MS: i64 = 86_400_000;
+
+    fn unused(older_than_days: u32, unused_days: u32) -> EntryRetention {
+        EntryRetention {
+            older_than_days,
+            unused_older_than_days: Some(unused_days),
+        }
+    }
+
+    /// Seeds a location + entry committed at `committed_at`.
+    async fn seed_committed(db: &SqliteDb, loc: &str, committed_at: i64) -> String {
+        let mut tx = db.begin().await.unwrap();
+        tx.insert_storage_location(loc, &format!("folder-{loc}"), 1)
+            .await
+            .unwrap();
+        let entry_id = format!("entry-{loc}");
+        let coord = CacheEntryCoord {
+            key: loc,
+            version: "v",
+            scope: "scn-unused",
+            repo_id: "r",
+        };
+        tx.seed_cache_entry(&entry_id, coord, committed_at, loc)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        entry_id
+    }
+
+    #[tokio::test]
+    async fn unused_pass_reaps_old_never_downloaded_and_keeps_the_rest() {
+        let db = fresh_db().await;
+        let storage = FakeStorage::new();
+        let now = 1_000 * DAY_MS;
+        let old_unused = seed_committed(&db, "old-unused", now - 8 * DAY_MS).await;
+        let fresh_unused = seed_committed(&db, "fresh-unused", now - 6 * DAY_MS).await;
+        // Committed long ago but downloaded recently: governed by the
+        // 30-day last-download window, not the unused one.
+        let old_used = seed_committed(&db, "old-used", now - 20 * DAY_MS).await;
+        db.touch_location_downloaded("old-used", now - DAY_MS)
+            .await
+            .unwrap();
+
+        let deleted = run(&db, &storage, now, unused(30, 7)).await;
+
+        assert_eq!(deleted, 1);
+        assert_eq!(
+            storage.deleted_folders(),
+            vec!["folder-old-unused".to_string()]
+        );
+        let present = |id: String| {
+            let db = &db;
+            async move { db.find_location_for_entry(&id).await.unwrap().is_some() }
+        };
+        assert!(!present(old_unused).await);
+        assert!(present(fresh_unused).await);
+        assert!(present(old_used).await);
+    }
+
+    #[tokio::test]
+    async fn unused_pass_is_off_when_unset() {
+        let db = fresh_db().await;
+        let storage = FakeStorage::new();
+        let now = 1_000 * DAY_MS;
+        seed_committed(&db, "ancient", 0).await;
+        assert_eq!(run(&db, &storage, now, days(30)).await, 0);
+        assert!(storage.deleted_folders().is_empty());
+    }
+
+    #[tokio::test]
+    async fn both_passes_count_into_one_total() {
+        let db = fresh_db().await;
+        let storage = FakeStorage::new();
+        let now = 1_000 * DAY_MS;
+        seed_committed(&db, "unused", now - 10 * DAY_MS).await;
+        seed_committed(&db, "stale", now - 100 * DAY_MS).await;
+        db.touch_location_downloaded("stale", now - 40 * DAY_MS)
+            .await
+            .unwrap();
+        assert_eq!(run(&db, &storage, now, unused(30, 7)).await, 2);
+        let mut folders = storage.deleted_folders();
+        folders.sort();
+        assert_eq!(folders, vec!["folder-stale", "folder-unused"]);
+    }
+
+    /// A location that got downloaded (or started merging) after the
+    /// page query must survive: the delete re-checks the predicate.
+    #[tokio::test]
+    async fn unused_delete_rechecks_that_the_location_is_still_unused() {
+        let db = fresh_db().await;
+        let storage = FakeStorage::new();
+        seed_committed(&db, "raced", 0).await;
+        let location = db.find_unused_locations(1, 10, 0).await.unwrap().remove(0);
+        db.touch_location_downloaded("raced", 5).await.unwrap();
+
+        let selector = super::Selector::NeverDownloadedCommittedBefore(1);
+        let deleted = super::delete_one(&db, &storage, selector, &location)
+            .await
+            .unwrap();
+        assert!(!deleted);
+        assert!(storage.deleted_folders().is_empty());
+        assert!(
+            db.find_location_for_entry("entry-raced")
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 }

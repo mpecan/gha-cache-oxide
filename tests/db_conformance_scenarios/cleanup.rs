@@ -431,3 +431,86 @@ pub async fn find_merged_with_parts_filters_on_merge_and_parts_flags(db: &dyn Db
         "claimed but not merged must NOT be reported"
     );
 }
+
+/// `find_unused_locations` (opt-in `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS`)
+/// returns exactly the never-downloaded locations whose entry was
+/// committed before the cutoff: not recent ones, not downloaded ones,
+/// and not orphans (those belong to the orphan sweep).
+pub async fn find_unused_locations_selects_old_never_downloaded(db: &dyn Db) {
+    async fn seed(db: &dyn Db, loc: &str, committed_at: i64) {
+        let mut tx = db.begin().await.unwrap();
+        tx.insert_storage_location(loc, loc, 1).await.unwrap();
+        let coord = CacheEntryCoord {
+            key: loc,
+            version: "v",
+            scope: "scn-unused",
+            repo_id: "r",
+        };
+        tx.seed_cache_entry(&format!("entry-{loc}"), coord, committed_at, loc)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    seed(db, "unused-old", 50_000).await;
+    seed(db, "unused-new", 150_000).await;
+    seed(db, "used-old", 50_000).await;
+    db.touch_location_downloaded("used-old", 60_000)
+        .await
+        .unwrap();
+    seed_orphan_location(db, "unused-orphan", "unused-orphan").await;
+
+    let found = db.find_unused_locations(100_000, 100, 0).await.unwrap();
+    let ours: Vec<&str> = found
+        .iter()
+        .map(|l| l.id.as_str())
+        .filter(|id| id.starts_with("unused-") || id.starts_with("used-"))
+        .collect();
+    assert_eq!(ours, vec!["unused-old"]);
+
+    // Strict `<`: an entry committed exactly at the cutoff is kept.
+    let at_cutoff = db.find_unused_locations(50_000, 100, 0).await.unwrap();
+    assert!(!at_cutoff.iter().any(|l| l.id == "unused-old"));
+}
+
+/// `delete_location_if_unused` deletes only while the location is still
+/// never-downloaded and un-merged; a restore or merge that started in
+/// the meantime keeps it.
+pub async fn delete_location_if_unused_rechecks_predicate(db: &dyn Db) {
+    for loc in ["dliu-unused", "dliu-downloaded", "dliu-merging"] {
+        seed_location_with_entry(db, loc, loc, &format!("entry-{loc}"), "scn-dliu").await;
+    }
+    db.touch_location_downloaded("dliu-downloaded", 1)
+        .await
+        .unwrap();
+    assert!(db.try_mark_merge_started("dliu-merging", 1).await.unwrap());
+
+    let mut tx = db.begin().await.unwrap();
+    assert!(tx.delete_location_if_unused("dliu-unused").await.unwrap());
+    assert!(
+        !tx.delete_location_if_unused("dliu-downloaded")
+            .await
+            .unwrap()
+    );
+    assert!(!tx.delete_location_if_unused("dliu-merging").await.unwrap());
+    assert!(!tx.delete_location_if_unused("dliu-missing").await.unwrap());
+    tx.commit().await.unwrap();
+
+    assert!(
+        db.find_location_for_entry("entry-dliu-unused")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.find_location_for_entry("entry-dliu-downloaded")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        db.find_location_for_entry("entry-dliu-merging")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

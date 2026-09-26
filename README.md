@@ -48,7 +48,7 @@ Minimum required to boot:
 | `STORAGE_DRIVER` | `filesystem`, `s3`, `gcs` | Required. Each driver unlocks its own set of vars (e.g. `STORAGE_FILESYSTEM_PATH`, `STORAGE_S3_BUCKET`). |
 | `DB_DRIVER` | `sqlite`, `postgres`, `mysql` | Required. Each driver unlocks its own set of vars (e.g. `DB_SQLITE_PATH`, `DB_POSTGRES_URL`). |
 
-Optional knobs with defaults: `PORT` (3000), `LOG_FORMAT` (`text`/`json`, default `text`), `CACHE_CLEANUP_OLDER_THAN_DAYS` (90), `DISABLE_CLEANUP_JOBS`, `CLEANUP_UPLOADS_SCHEDULE` (`*/5 * * * *`), `CLEANUP_HOURLY_SCHEDULE` (`0 * * * *`), `CLEANUP_DAILY_SCHEDULE` (`0 0 * * *`), `ENABLE_DIRECT_DOWNLOADS`, `SKIP_TOKEN_VALIDATION`, `MANAGEMENT_API_KEY`, `DEFAULT_ACTIONS_RESULTS_URL` (default `https://results-receiver.actions.githubusercontent.com`), `PROXY_MAX_REQUEST_BODY_BYTES` (default 16 MiB = `16777216`).
+Optional knobs with defaults: `PORT` (3000), `LOG_FORMAT` (`text`/`json`, default `text`), `CACHE_CLEANUP_OLDER_THAN_DAYS` (90), `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` (unset), `DISABLE_CLEANUP_JOBS`, `CLEANUP_UPLOADS_SCHEDULE` (`*/5 * * * *`), `CLEANUP_HOURLY_SCHEDULE` (`0 * * * *`), `CLEANUP_DAILY_SCHEDULE` (`0 0 * * *`), `ENABLE_DIRECT_DOWNLOADS`, `SKIP_TOKEN_VALIDATION`, `MANAGEMENT_API_KEY`, `DEFAULT_ACTIONS_RESULTS_URL` (default `https://results-receiver.actions.githubusercontent.com`), `PROXY_MAX_REQUEST_BODY_BYTES` (default 16 MiB = `16777216`).
 
 The three `CLEANUP_*_SCHEDULE` knobs are cron expressions and default
 to upstream's `nitro.config.ts` cron lines verbatim — `*/5 * * * *`
@@ -59,6 +59,17 @@ for `cleanup:uploads`, `0 * * * *` for `cleanup:parts` +
 directly (e.g. `*/30 * * * * *` for every 30 seconds). Cadences are
 wall-clock aligned, just like upstream cron. Set
 `DISABLE_CLEANUP_JOBS=true` to disable cleanup entirely.
+
+`CACHE_CLEANUP_OLDER_THAN_DAYS` expires entries by their **last
+download**, exactly like upstream — so an entry that is saved but never
+restored never expires. `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` is an
+opt-in (not in upstream) that also reaps never-downloaded entries once
+they were last committed more than that many days ago (re-saving the
+same key restarts the clock), in the same daily
+`cleanup:cache-entries` pass. Unset keeps upstream behaviour; `0` is
+rejected. `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS=7` with
+`CACHE_CLEANUP_OLDER_THAN_DAYS=30` mirrors the Forgejo runner's own
+cache GC.
 
 `DEFAULT_ACTIONS_RESULTS_URL` is the receiver the catch-all fallback
 proxy forwards unhandled paths to — `actions/cache` clients reach
@@ -150,6 +161,10 @@ arrive (parallel, any order); commit validates that they tile the
 declared size and rewrites them server-side into oxide's normal parts
 layout. Deliberate deviations from act are listed at the top of
 [`src/routes/forgejo/mod.rs`](./src/routes/forgejo/mod.rs).
+
+Write-isolated PR caches and superseded keys are often saved and never
+restored; set `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` (see
+[Configuration](#configuration)) if they should not accumulate.
 
 Prometheus counters for the dialect are served at `GET /metrics`
 (`gha_cache_oxide_forgejo_{cache_lookups,upload_bytes,download_bytes,upload_errors,commits,commit_errors,auth_failures}_total`).

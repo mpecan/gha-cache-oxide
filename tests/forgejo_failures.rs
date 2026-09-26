@@ -7,9 +7,16 @@ mod forgejo_common;
 
 use std::sync::atomic::Ordering;
 
+use gha_cache_oxide::tasks::cleanup::EntryRetention;
+
 use forgejo_common::{Runner, VERSION, random_bytes, spawn, spawn_flaky};
 use reqwest::{Method, StatusCode};
 use serde_json::Value;
+
+const RETENTION: EntryRetention = EntryRetention {
+    older_than_days: 90,
+    unused_older_than_days: None,
+};
 
 async fn setup() -> (forgejo_common::Server, Runner) {
     let srv = spawn(Some(forgejo_common::SECRET)).await;
@@ -127,9 +134,13 @@ async fn cleanup_reaps_abandoned_chunked_upload() {
     assert_eq!(srv.storage.list_folder(&folder).await.unwrap().len(), 1);
 
     let later = chrono::Utc::now().timestamp_millis() + 10 * 60_000;
-    let report =
-        gha_cache_oxide::tasks::cleanup::run_all(srv.db.as_ref(), srv.storage.as_ref(), later, 90)
-            .await;
+    let report = gha_cache_oxide::tasks::cleanup::run_all(
+        srv.db.as_ref(),
+        srv.storage.as_ref(),
+        later,
+        RETENTION,
+    )
+    .await;
     assert_eq!(report.uploads_deleted, 1);
     assert!(srv.db.find_upload_by_id(id).await.unwrap().is_none());
     assert!(srv.storage.list_folder(&folder).await.unwrap().is_empty());
@@ -155,7 +166,7 @@ async fn cleanup_keeps_upload_that_is_receiving_chunks() {
         srv.db.as_ref(),
         srv.storage.as_ref(),
         now + 90_000,
-        90,
+        RETENTION,
     )
     .await;
     assert_eq!(report.uploads_deleted, 0);

@@ -301,6 +301,8 @@ pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::delete_upload_if_stale_re_checks_predicate(db).await;
     scenarios::find_expired_locations_respects_cutoff(db).await;
     scenarios::find_expired_locations_excludes_null_last_downloaded_at(db).await;
+    scenarios::find_unused_locations_selects_old_never_downloaded(db).await;
+    scenarios::delete_location_if_unused_rechecks_predicate(db).await;
     scenarios::find_orphan_locations_excludes_referenced_rows(db).await;
     scenarios::find_merged_with_parts_filters_on_merge_and_parts_flags(db).await;
     scenarios::list_cache_entries_no_filter_paginates(db).await;
@@ -378,6 +380,8 @@ db_conformance_cases!(
     delete_upload_if_stale_re_checks_predicate,
     find_expired_locations_respects_cutoff,
     find_expired_locations_excludes_null_last_downloaded_at,
+    find_unused_locations_selects_old_never_downloaded,
+    delete_location_if_unused_rechecks_predicate,
     find_orphan_locations_excludes_referenced_rows,
     find_merged_with_parts_filters_on_merge_and_parts_flags,
     list_cache_entries_no_filter_paginates,
@@ -420,6 +424,8 @@ db_conformance_cases!(
     delete_upload_if_stale_re_checks_predicate,
     find_expired_locations_respects_cutoff,
     find_expired_locations_excludes_null_last_downloaded_at,
+    find_unused_locations_selects_old_never_downloaded,
+    delete_location_if_unused_rechecks_predicate,
     find_orphan_locations_excludes_referenced_rows,
     find_merged_with_parts_filters_on_merge_and_parts_flags,
     list_cache_entries_no_filter_paginates,
@@ -462,6 +468,8 @@ db_conformance_cases!(
     delete_upload_if_stale_re_checks_predicate,
     find_expired_locations_respects_cutoff,
     find_expired_locations_excludes_null_last_downloaded_at,
+    find_unused_locations_selects_old_never_downloaded,
+    delete_location_if_unused_rechecks_predicate,
     find_orphan_locations_excludes_referenced_rows,
     find_merged_with_parts_filters_on_merge_and_parts_flags,
     list_cache_entries_no_filter_paginates,

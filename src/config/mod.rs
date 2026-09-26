@@ -33,6 +33,13 @@ pub struct AppConfig {
     pub port: u16,
     pub log_format: LogFormat,
     pub cache_cleanup_older_than_days: u32,
+    /// Opt-in expiry for entries that were **never** downloaded
+    /// (`CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS`), measured from the last
+    /// commit of the entry (re-saving a key restarts the clock). `None` (unset) keeps them forever — upstream parity, since
+    /// `CACHE_CLEANUP_OLDER_THAN_DAYS` keys on `lastDownloadedAt` and a
+    /// NULL never expires. Not an upstream knob; act (the Forgejo runner
+    /// cache) uses 7 days for unused and 30 for used entries.
+    pub cache_cleanup_unused_older_than_days: Option<u32>,
     pub disable_cleanup_jobs: bool,
     /// Cron schedule for `cleanup:uploads`. Default `*/5 * * * *`,
     /// matching upstream `nitro.config.ts:25`. 5-field upstream syntax
@@ -102,6 +109,7 @@ impl AppConfig {
                 "CACHE_CLEANUP_OLDER_THAN_DAYS",
                 90,
             )?,
+            cache_cleanup_unused_older_than_days: parse_unused_older_than_days()?,
             disable_cleanup_jobs: env::bool_or_default("DISABLE_CLEANUP_JOBS", false)?,
             cleanup_uploads_cron: cron_schedule_or_default(
                 "CLEANUP_UPLOADS_SCHEDULE",
@@ -139,6 +147,30 @@ impl AppConfig {
 fn parse_proxy_max_body() -> Result<usize, ConfigError> {
     let raw = env::usize_or_default("PROXY_MAX_REQUEST_BODY_BYTES", 16 * 1024 * 1024)?;
     Ok(if raw == 0 { usize::MAX } else { raw })
+}
+
+/// Reads `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS`. Unset/empty → `None`
+/// (feature off). `0` is rejected rather than read as "expire every
+/// never-downloaded entry immediately", which would reap caches before
+/// their first restore.
+fn parse_unused_older_than_days() -> Result<Option<u32>, ConfigError> {
+    const VAR: &str = "CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS";
+    let Some(raw) = env::optional(VAR) else {
+        return Ok(None);
+    };
+    match raw.parse::<u32>() {
+        Ok(0) => Err(ConfigError::Invalid {
+            var: VAR,
+            value: raw,
+            reason: "must be at least 1 (unset it to keep never-downloaded entries)".into(),
+        }),
+        Ok(days) => Ok(Some(days)),
+        Err(e) => Err(ConfigError::Invalid {
+            var: VAR,
+            value: raw,
+            reason: e.to_string(),
+        }),
+    }
 }
 
 fn parse_port() -> Result<u16, ConfigError> {

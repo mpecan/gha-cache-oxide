@@ -52,6 +52,7 @@ impl AppConfig {
             port: 0,
             log_format: LogFormat::Text,
             cache_cleanup_older_than_days: 90,
+            cache_cleanup_unused_older_than_days: None,
             disable_cleanup_jobs: true,
             cleanup_uploads_cron: cron::Schedule::from_str("0 */5 * * * *")
                 .expect("hardcoded valid cron"),

@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         cleanup::SchedulerSpawn {
             db: db.clone(),
             storage: storage.clone(),
-            cache_cleanup_older_than_days: config.cache_cleanup_older_than_days,
+            retention: cleanup::EntryRetention::from_config(&config),
             schedules: cleanup::CleanupSchedules {
                 uploads: cleanup::Schedule::Cron(Box::new(config.cleanup_uploads_cron.clone())),
                 hourly: cleanup::Schedule::Cron(Box::new(config.cleanup_hourly_cron.clone())),

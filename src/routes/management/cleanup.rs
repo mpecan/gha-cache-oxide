@@ -32,7 +32,7 @@ pub(super) async fn trigger(State(state): State<AppState>) -> Response {
         &*state.db,
         &*state.storage,
         now_ms(),
-        state.config.cache_cleanup_older_than_days,
+        cleanup::EntryRetention::from_config(&state.config),
     )
     .await;
     tracing::info!(?report, "management cleanup trigger complete");

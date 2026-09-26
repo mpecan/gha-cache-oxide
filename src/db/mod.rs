@@ -287,6 +287,25 @@ pub trait Db: Send + Sync {
         offset: i64,
     ) -> Result<Vec<StorageLocation>, sqlx::Error>;
 
+    /// Returns one page of never-downloaded `storage_locations`
+    /// (`lastDownloadedAt IS NULL`) whose cache entry was committed
+    /// (`cache_entries.updatedAt`) strictly before `cutoff_ms`.
+    ///
+    /// Backs the opt-in `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` pass of
+    /// `cleanup:cache-entries`; with it unset, never-downloaded entries
+    /// are kept forever (upstream parity, see
+    /// [`Db::find_expired_locations`]). Locations without an entry are
+    /// the orphan sweep's job and are not returned.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_unused_locations(
+        &self,
+        cutoff_ms: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error>;
+
     /// Returns one page of `storage_locations` rows that no
     /// `cache_entries` row points at — i.e. orphan storage locations.
     /// Mirrors upstream `tasks/cleanup/storage-locations.ts:22-36`.
@@ -560,6 +579,15 @@ pub trait DbTx: Send {
     /// # Errors
     /// Returns `sqlx::Error` on delete failure.
     async fn delete_storage_location(&mut self, id: &str) -> Result<(), sqlx::Error>;
+
+    /// Deletes a `storage_locations` row only if it is still unused:
+    /// never downloaded and no lazy merge started. Returns `true` when
+    /// it deleted. The unused-entries cleanup pass uses this so a first
+    /// restore that lands between its page query and the delete wins.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on delete failure.
+    async fn delete_location_if_unused(&mut self, id: &str) -> Result<bool, sqlx::Error>;
 
     /// Deletes an `uploads` row by id inside this transaction. Returns
     /// `true` when a row was removed; commit paths treat `false` as

@@ -83,7 +83,10 @@ fn spawn_test(
         cleanup::SchedulerSpawn {
             db,
             storage,
-            cache_cleanup_older_than_days: 90,
+            retention: gha_cache_oxide::tasks::cleanup::EntryRetention {
+                older_than_days: 90,
+                unused_older_than_days: None,
+            },
             schedules,
         },
         token,
@@ -218,7 +221,10 @@ async fn maybe_spawn_respects_disable_flag() {
     let spawn_disabled = cleanup::SchedulerSpawn {
         db: db.clone(),
         storage: storage.clone(),
-        cache_cleanup_older_than_days: 90,
+        retention: gha_cache_oxide::tasks::cleanup::EntryRetention {
+            older_than_days: 90,
+            unused_older_than_days: None,
+        },
         schedules: default_test_schedules(),
     };
     let none = cleanup::maybe_spawn(spawn_disabled, true, token.clone());
@@ -227,7 +233,10 @@ async fn maybe_spawn_respects_disable_flag() {
     let spawn_enabled = cleanup::SchedulerSpawn {
         db: db.clone(),
         storage: storage.clone(),
-        cache_cleanup_older_than_days: 90,
+        retention: gha_cache_oxide::tasks::cleanup::EntryRetention {
+            older_than_days: 90,
+            unused_older_than_days: None,
+        },
         schedules: default_test_schedules(),
     };
     let schedulers = cleanup::maybe_spawn(spawn_enabled, false, token.clone());
@@ -386,7 +395,10 @@ async fn three_cadences_each_drive_their_own_tasks() {
         cleanup::SchedulerSpawn {
             db: db.clone(),
             storage: storage.clone(),
-            cache_cleanup_older_than_days: 1,
+            retention: gha_cache_oxide::tasks::cleanup::EntryRetention {
+                older_than_days: 1,
+                unused_older_than_days: None,
+            },
             schedules: cleanup::CleanupSchedules {
                 uploads: cleanup::Schedule::Every(Duration::from_millis(50)),
                 hourly: cleanup::Schedule::Every(Duration::from_millis(80)),
