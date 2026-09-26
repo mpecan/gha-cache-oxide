@@ -401,3 +401,26 @@ async fn metrics_are_not_mounted_without_the_dialect() {
     let resp = reqwest::get(format!("{}/metrics", srv.base)).await.unwrap();
     assert_ne!(resp.status(), StatusCode::OK);
 }
+
+/// Regression (trial, setup-node `cache: pnpm`): the restored key must
+/// equal the primary key byte-for-byte, or `actions/setup-node`
+/// (`primaryKey === matchedKey`) re-uploads the whole cache on a hit.
+#[tokio::test]
+async fn exact_hit_returns_the_requested_key_case() {
+    let (_srv, r) = setup().await;
+    let key = "node-cache-Linux-x64-pnpm-AbC123";
+    r.upload_normally(key, VERSION, &[1; 10]).await;
+
+    let (_, body) = r.find(key, VERSION).await;
+    assert_eq!(body.unwrap()["cacheKey"], key);
+
+    // A restore key that matches exactly is echoed too.
+    let (_, body) = r
+        .find(&format!("node-cache-Linux-x64-pnpm-nomatch,{key}"), VERSION)
+        .await;
+    assert_eq!(body.unwrap()["cacheKey"], key);
+
+    // A prefix hit has no requested spelling to echo: stored key.
+    let (_, body) = r.find("node-cache-Linux-x64-pnpm-", VERSION).await;
+    assert_eq!(body.unwrap()["cacheKey"], key.to_lowercase());
+}

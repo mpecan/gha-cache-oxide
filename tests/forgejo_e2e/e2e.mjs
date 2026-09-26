@@ -40,12 +40,14 @@ assert(typeof id === 'number' && id > 0, `save returned cacheId ${id} (${mb} MiB
 
 fs.rmSync('data', { recursive: true });
 t = Date.now();
-assert((await cache.restoreCache(['data'], key)) === key.toLowerCase(), `exact restore hits (key lowercased, as act does) (${Date.now() - t} ms)`);
+assert((await cache.restoreCache(['data'], key)) === key, `exact restore hits with the key as sent, as setup-node's primaryKey === matchedKey needs (${Date.now() - t} ms)`);
 assert(sha('data/big.bin') === want.big && sha('data/small.txt') === want.small, 'restored bytes identical');
 
 fs.rmSync('data', { recursive: true });
 const hit = await cache.restoreCache(['data'], `e2e-rust-${run}-nomatch`, [`E2E-rust-${run}`]);
-assert(hit === key.toLowerCase(), `restore-key prefix hits (case-insensitive): ${hit}`);
+// The restore key equals the stored key case-insensitively, so this is
+// an exact restore-key match: echoed as sent.
+assert(hit === `E2E-rust-${run}`, `restore key hits case-insensitively, echoed as sent: ${hit}`);
 assert(sha('data/big.bin') === want.big, 'prefix-restored bytes identical');
 
 // Write isolation: a PR run saves under its key; shared runs must not see it.
@@ -53,7 +55,7 @@ use(process.env.URL_ISOLATED);
 const isoKey = `e2e-iso-${run}`;
 makeData(2);
 await cache.saveCache(['data'], isoKey);
-assert((await cache.restoreCache(['data'], isoKey)) === isoKey.toLowerCase(), 'isolated run reads its own entry');
+assert((await cache.restoreCache(['data'], isoKey)) === isoKey, 'isolated run reads its own entry');
 use(process.env.URL_SHARED);
 assert((await cache.restoreCache(['data'], isoKey)) === undefined, 'shared run cannot read isolated entry');
 use(process.env.URL_ISOLATED);

@@ -59,12 +59,8 @@ pub(super) async fn find(
     Extension(run): Extension<ForgejoRun>,
     Query(q): Query<FindQuery>,
 ) -> Response {
-    let keys: Vec<String> = q
-        .keys
-        .split(',')
-        .filter(|k| !k.is_empty())
-        .map(str::to_lowercase)
-        .collect();
+    let requested: Vec<&str> = q.keys.split(',').filter(|k| !k.is_empty()).collect();
+    let keys: Vec<String> = requested.iter().map(|k| k.to_lowercase()).collect();
     let Some((primary, restore)) = keys.split_first() else {
         return miss(&state);
     };
@@ -83,7 +79,7 @@ pub(super) async fn find(
             repo_id: &run.repo_id,
         };
         match match_with_healthy_storage(&state, req).await {
-            Ok(Some(entry)) => return hit(&state, &run, &entry),
+            Ok(Some(entry)) => return hit(&state, &run, &entry, &requested),
             Ok(None) => {}
             Err(resp) => return resp,
         }
@@ -91,7 +87,21 @@ pub(super) async fn find(
     miss(&state)
 }
 
-fn hit(state: &AppState, run: &ForgejoRun, entry: &CacheEntry) -> Response {
+/// `cacheKey` for a hit. Keys are stored and matched lowercased (as in
+/// act), but clients compare the restored key with the key they asked
+/// for case-sensitively — `actions/setup-node` does `primaryKey ===
+/// matchedKey` and re-saves the whole cache on a mismatch. So an exact
+/// (case-insensitive) match on a requested key echoes that key as the
+/// client spelled it; only a prefix match returns the stored key.
+fn display_key<'a>(entry: &'a CacheEntry, requested: &[&'a str]) -> &'a str {
+    requested
+        .iter()
+        .copied()
+        .find(|k| k.to_lowercase() == entry.key)
+        .unwrap_or(&entry.key)
+}
+
+fn hit(state: &AppState, run: &ForgejoRun, entry: &CacheEntry, requested: &[&str]) -> Response {
     state.metrics.forgejo.find_hits.inc();
     let archive_location = format!(
         "{}/{}{BASE_PATH}/artifacts/{}",
@@ -100,7 +110,7 @@ fn hit(state: &AppState, run: &ForgejoRun, entry: &CacheEntry) -> Response {
     Json(json!({
         "result": "hit",
         "archiveLocation": archive_location,
-        "cacheKey": entry.key,
+        "cacheKey": display_key(entry, requested),
     }))
     .into_response()
 }
