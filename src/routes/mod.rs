@@ -2,6 +2,7 @@
 
 pub mod blob;
 pub(crate) mod errors;
+pub mod forgejo;
 pub mod health;
 pub mod management;
 pub(crate) mod proxy;

@@ -286,6 +286,15 @@ impl StorageAdapter for AlwaysFailDelete {
     async fn count_files_in_folder(&self, _: &str) -> Result<u64, StorageError> {
         Ok(0)
     }
+    async fn list_folder(
+        &self,
+        _: &str,
+    ) -> Result<Vec<gha_cache_oxide::storage::ObjectInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn copy(&self, from: &str, _: &str) -> Result<(), StorageError> {
+        Err(StorageError::ObjectNotFound(from.to_string()))
+    }
     async fn signed_url(&self, _: &str) -> Result<Option<url::Url>, StorageError> {
         Ok(None)
     }

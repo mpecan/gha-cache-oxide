@@ -51,7 +51,9 @@ use reqwest::Method;
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
-use super::{ByteStream, StorageAdapter, StorageError, validate_object_name};
+use super::{
+    ByteStream, ObjectInfo, StorageAdapter, StorageError, list_under_prefix, validate_object_name,
+};
 
 /// All object names are stored under this prefix so upstream-populated
 /// buckets remain drop-in compatible.
@@ -227,6 +229,22 @@ impl StorageAdapter for GcsAdapter {
             }
         }
         Ok(count)
+    }
+
+    async fn list_folder(&self, folder_name: &str) -> Result<Vec<ObjectInfo>, StorageError> {
+        validate_object_name(folder_name)?;
+        let prefix = self.prefixed_folder(folder_name);
+        list_under_prefix(self.store.as_ref(), &prefix).await
+    }
+
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        validate_object_name(from)?;
+        validate_object_name(to)?;
+        let (src, dst) = (self.prefixed(from), self.prefixed(to));
+        self.store
+            .copy(&src, &dst)
+            .await
+            .map_err(|e| translate_not_found(e, from))
     }
 
     async fn signed_url(&self, object_name: &str) -> Result<Option<Url>, StorageError> {

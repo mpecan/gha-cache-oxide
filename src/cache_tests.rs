@@ -308,3 +308,35 @@ async fn overwriting_existing_entry_deletes_previous_folder_from_storage() {
         "the old upload's folder should be deleted from storage"
     );
 }
+
+/// Two overlapping finalizes of one upload (a client retry): only the
+/// one that claims the `uploads` row commits; the other is
+/// `UploadNotFound` and must not delete the winner's blobs. Before the
+/// claim both "succeeded" and the second deleted the shared folder as
+/// "superseded".
+#[tokio::test]
+async fn concurrent_finalize_commits_once_and_keeps_blobs() {
+    let fx = fixture().await;
+    let id = seed_upload(&fx, 2, 2, 2).await;
+    let params = || CompleteUploadParams {
+        coord: coord(),
+        now_ms: 1_000,
+    };
+
+    let (a, b) = tokio::join!(
+        complete_upload(&fx.db, fx.adapter.as_ref(), params()),
+        complete_upload(&fx.db, fx.adapter.as_ref(), params()),
+    );
+    let oks = [&a, &b].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(oks, 1, "exactly one finalize wins: {a:?} / {b:?}");
+    assert!(
+        [&a, &b]
+            .iter()
+            .any(|r| matches!(r, Err(CompleteUploadError::UploadNotFound))),
+        "the loser reports UploadNotFound: {a:?} / {b:?}"
+    );
+    assert_eq!(count_cache_entries(&fx.db).await, 1);
+    assert_eq!(count_storage_locations(&fx.db).await, 1);
+    let parts = format!("{id}/parts");
+    assert_eq!(fx.adapter.count_files_in_folder(&parts).await.unwrap(), 2);
+}

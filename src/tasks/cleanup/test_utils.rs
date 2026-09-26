@@ -71,6 +71,17 @@ impl StorageAdapter for FakeStorage {
         Ok(0)
     }
 
+    async fn list_folder(
+        &self,
+        _folder_name: &str,
+    ) -> Result<Vec<crate::storage::ObjectInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn copy(&self, from: &str, _to: &str) -> Result<(), StorageError> {
+        Err(StorageError::ObjectNotFound(from.to_string()))
+    }
+
     async fn signed_url(&self, _object_name: &str) -> Result<Option<url::Url>, StorageError> {
         Ok(None)
     }

@@ -276,6 +276,7 @@ pub async fn run_conformance_suite(db: &dyn Db) {
     scenarios::upload_lifecycle_round_trip(db).await;
     scenarios::find_upload_by_coord_discriminates_each_field(db).await;
     scenarios::update_helpers_are_noops_on_unknown_ids(db).await;
+    scenarios::upload_claim_and_touch_report_row_presence(db).await;
     scenarios::find_location_for_entry_join(db).await;
     scenarios::touch_location_downloaded_sets_timestamp(db).await;
     scenarios::upsert_cache_entry_insert_then_update(db).await;
@@ -352,6 +353,7 @@ db_conformance_cases!(
     upload_lifecycle_round_trip,
     find_upload_by_coord_discriminates_each_field,
     update_helpers_are_noops_on_unknown_ids,
+    upload_claim_and_touch_report_row_presence,
     find_location_for_entry_join,
     touch_location_downloaded_sets_timestamp,
     upsert_cache_entry_insert_then_update,
@@ -393,6 +395,7 @@ db_conformance_cases!(
     upload_lifecycle_round_trip,
     find_upload_by_coord_discriminates_each_field,
     update_helpers_are_noops_on_unknown_ids,
+    upload_claim_and_touch_report_row_presence,
     find_location_for_entry_join,
     touch_location_downloaded_sets_timestamp,
     upsert_cache_entry_insert_then_update,
@@ -434,6 +437,7 @@ db_conformance_cases!(
     upload_lifecycle_round_trip,
     find_upload_by_coord_discriminates_each_field,
     update_helpers_are_noops_on_unknown_ids,
+    upload_claim_and_touch_report_row_presence,
     find_location_for_entry_join,
     touch_location_downloaded_sets_timestamp,
     upsert_cache_entry_insert_then_update,

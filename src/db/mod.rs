@@ -126,11 +126,24 @@ pub trait Db: Send + Sync {
     /// Returns `sqlx::Error` on update failure.
     async fn increment_upload_finished(&self, id: i64, now_ms: i64) -> Result<(), sqlx::Error>;
 
-    /// Deletes an upload row.
+    /// Deletes an upload row. Returns `true` when a row was removed,
+    /// `false` when it was already gone (committed, reaped, or never
+    /// existed) — callers use this as a claim to decide who owns the
+    /// upload's blobs.
     ///
     /// # Errors
     /// Returns `sqlx::Error` on delete failure.
-    async fn delete_upload(&self, id: i64) -> Result<(), sqlx::Error>;
+    async fn delete_upload(&self, id: i64) -> Result<bool, sqlx::Error>;
+
+    /// Sets `lastPartUploadedAt` without touching the part counters.
+    /// Used by the chunked (Forgejo v1) upload path at the start and end
+    /// of every chunk (and before commit copies) so `cleanup:uploads`,
+    /// which keys on the last touch, leaves active uploads alone.
+    /// Returns `false` when the row is gone.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on update failure.
+    async fn touch_upload(&self, id: i64, now_ms: i64) -> Result<bool, sqlx::Error>;
 
     // ---- storage locations --------------------------------------------
 
@@ -548,11 +561,13 @@ pub trait DbTx: Send {
     /// Returns `sqlx::Error` on delete failure.
     async fn delete_storage_location(&mut self, id: &str) -> Result<(), sqlx::Error>;
 
-    /// Deletes an `uploads` row by id inside this transaction.
+    /// Deletes an `uploads` row by id inside this transaction. Returns
+    /// `true` when a row was removed; commit paths treat `false` as
+    /// "someone else already consumed this upload" and roll back.
     ///
     /// # Errors
     /// Returns `sqlx::Error` on delete failure.
-    async fn delete_upload(&mut self, id: i64) -> Result<(), sqlx::Error>;
+    async fn delete_upload(&mut self, id: i64) -> Result<bool, sqlx::Error>;
 
     /// Deletes an `uploads` row only if the staleness predicate the
     /// background `cleanup:uploads` task uses still holds at delete
@@ -620,70 +635,4 @@ pub(crate) fn escape_like_pattern(value: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn connect_in_memory_and_migrate_is_idempotent() {
-        let db = SqliteDb::connect_in_memory().await.unwrap();
-        db.migrate().await.unwrap();
-        db.migrate().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn migrations_produce_expected_tables() {
-        let db = SqliteDb::connect_in_memory().await.unwrap();
-        db.migrate().await.unwrap();
-        let pool = db.as_sqlite_pool().expect("sqlite pool exposed");
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_sqlx%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-
-        assert_eq!(
-            tables,
-            vec!["cache_entries", "storage_locations", "uploads"]
-        );
-    }
-
-    #[tokio::test]
-    async fn cache_entries_foreign_key_is_on_delete_cascade() {
-        let db = SqliteDb::connect_in_memory().await.unwrap();
-        db.migrate().await.unwrap();
-        let pool = db.as_sqlite_pool().expect("sqlite pool exposed");
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT \"table\", \"from\", \"on_delete\" FROM pragma_foreign_key_list('cache_entries')",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-
-        assert_eq!(rows.len(), 1, "expected exactly one FK on cache_entries");
-        let (table, from, on_delete) = &rows[0];
-        assert_eq!(table, "storage_locations");
-        assert_eq!(from, "locationId");
-        assert_eq!(on_delete, "CASCADE");
-    }
-
-    #[tokio::test]
-    async fn foreign_keys_are_enforced_at_runtime() {
-        let db = SqliteDb::connect_in_memory().await.unwrap();
-        db.migrate().await.unwrap();
-        let pool = db.as_sqlite_pool().expect("sqlite pool exposed");
-        let result = sqlx::query(
-            "INSERT INTO cache_entries (id, key, version, updatedAt, locationId, scope, repoId)
-             VALUES ('e1', 'k', 'v', 0, 'missing-location', 's', 'r')",
-        )
-        .execute(pool)
-        .await;
-
-        let err = result.expect_err("FK violation should fail the insert");
-        assert!(
-            format!("{err}").to_lowercase().contains("foreign key"),
-            "expected FK error, got: {err}"
-        );
-    }
-}
+mod tests;

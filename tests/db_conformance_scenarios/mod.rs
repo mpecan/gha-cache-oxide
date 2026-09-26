@@ -13,9 +13,11 @@
 mod cleanup;
 mod management;
 mod recovery;
+mod uploads;
 pub use cleanup::*;
 pub use management::*;
 pub use recovery::*;
+pub use uploads::*;
 
 use gha_cache_oxide::db::Db;
 use gha_cache_oxide::db::entities::{CacheEntryCoord, MatchRequest, MatchType, NewUpload};
@@ -122,19 +124,6 @@ pub async fn find_upload_by_coord_discriminates_each_field(db: &dyn Db) {
         );
     }
     assert!(db.find_upload_by_coord(base).await.unwrap().is_some());
-}
-
-/// Upstream contract: the update/delete helpers silently no-op on
-/// missing rows rather than raising. A driver that flipped to
-/// erroring would break `touch_location_downloaded`'s fire-and-forget
-/// call site in the download handler.
-pub async fn update_helpers_are_noops_on_unknown_ids(db: &dyn Db) {
-    db.increment_upload_started(1).await.unwrap();
-    db.increment_upload_finished(1, 0).await.unwrap();
-    db.delete_upload(1).await.unwrap();
-    db.touch_location_downloaded("does-not-exist", 0)
-        .await
-        .unwrap();
 }
 
 /// Seeds a `storage_locations` + `cache_entries` pair and reads the

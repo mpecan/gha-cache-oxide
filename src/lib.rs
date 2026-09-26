@@ -10,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod merge;
+pub mod metrics;
 pub mod routes;
 pub mod state;
 pub mod storage;
@@ -80,12 +81,28 @@ pub fn build_app(state: AppState) -> Router {
     // applied inside the sub-router (different from the management
     // REST surface's Bearer auth).
     let management_rpc = routes::management::rpc::router(state.clone());
-    Router::new()
+    // Forgejo runner v1 cache dialect: mounted only when its shared
+    // secret is configured, so v2-only deployments expose nothing new.
+    let forgejo = state
+        .config
+        .forgejo_cache_secret
+        .is_some()
+        .then(|| routes::forgejo::router(state.clone()));
+    let mut app = Router::new()
         .route("/health", get(routes::health::handler))
         .nest("/twirp/github.actions.results.api.v1.CacheService", twirp)
         .nest("/management", management)
         .nest("/management-api/_rpc", management_rpc)
-        .merge(blob)
+        .merge(blob);
+    if let Some(forgejo) = forgejo {
+        // `/metrics` only exports Forgejo counters today, so it is
+        // mounted with the dialect. Unauthenticated, like most scrape
+        // endpoints: expose the port to the cluster, not the internet.
+        app = app
+            .nest(routes::forgejo::BASE_PATH, forgejo)
+            .route("/metrics", get(metrics::handler));
+    }
+    app
         // Catch-all proxy to `DEFAULT_ACTIONS_RESULTS_URL` (issue #24,
         // ports upstream `routes/[...path].ts`). Runs only for requests
         // that don't match any explicit route above.

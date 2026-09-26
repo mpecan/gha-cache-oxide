@@ -66,6 +66,15 @@ impl StorageAdapter for SlowReadsAdapter {
         self.inner.count_files_in_folder(folder_name).await
     }
 
+    async fn list_folder(
+        &self,
+        folder_name: &str,
+    ) -> Result<Vec<gha_cache_oxide::storage::ObjectInfo>, StorageError> {
+        self.inner.list_folder(folder_name).await
+    }
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        self.inner.copy(from, to).await
+    }
     async fn signed_url(&self, object_name: &str) -> Result<Option<url::Url>, StorageError> {
         self.inner.signed_url(object_name).await
     }

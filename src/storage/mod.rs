@@ -30,6 +30,15 @@ use url::Url;
 /// natively to avoid a layer of wrapping in the hot path.
 pub type ByteStream = BoxStream<'static, Result<Bytes, std::io::Error>>;
 
+/// One object returned by [`StorageAdapter::list_folder`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectInfo {
+    /// Path relative to the listed folder (no leading slash).
+    pub name: String,
+    /// Object size in bytes.
+    pub size: u64,
+}
+
 /// Errors produced by the storage layer.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -81,6 +90,16 @@ pub trait StorageAdapter: Send + Sync {
     /// folder rather than an error.
     async fn count_files_in_folder(&self, folder_name: &str) -> Result<u64, StorageError>;
 
+    /// Lists every object under `folder_name/`, sorted by name. Returns
+    /// an empty list for a missing folder rather than an error.
+    async fn list_folder(&self, folder_name: &str) -> Result<Vec<ObjectInfo>, StorageError>;
+
+    /// Copies the object at `from` to `to`, overwriting `to`. Object
+    /// stores do this server-side (S3 `CopyObject`), so no bytes pass
+    /// through this process. Errors with [`StorageError::ObjectNotFound`]
+    /// if `from` does not exist.
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError>;
+
     /// Returns a time-limited download URL for direct-to-client download,
     /// or `Ok(None)` if the backend cannot sign URLs (filesystem).
     async fn signed_url(&self, object_name: &str) -> Result<Option<Url>, StorageError>;
@@ -88,6 +107,42 @@ pub trait StorageAdapter: Send + Sync {
     /// Removes every object this adapter manages. Used by tests and
     /// administrative clear operations.
     async fn clear(&self) -> Result<(), StorageError>;
+}
+
+/// Shared `list_folder` body for every `object_store`-backed driver.
+/// `prefix` is the driver's fully-prefixed folder path; returned names
+/// are relative to it.
+pub(crate) async fn list_under_prefix(
+    store: &dyn object_store::ObjectStore,
+    prefix: &object_store::path::Path,
+) -> Result<Vec<ObjectInfo>, StorageError> {
+    use futures::StreamExt;
+    let mut list = store.list(Some(prefix));
+    let mut out = Vec::new();
+    while let Some(item) = list.next().await {
+        match item {
+            Ok(meta) => {
+                let Some(parts) = meta.location.prefix_match(prefix) else {
+                    continue;
+                };
+                let name = parts
+                    .map(|p| p.as_ref().to_string())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push(ObjectInfo {
+                    name,
+                    size: meta.size,
+                });
+            }
+            // A missing folder lists as NotFound on some backends; that
+            // is "empty". Mid-listing, it is a real error — returning the
+            // partial list would look like missing chunks.
+            Err(object_store::Error::NotFound { .. }) if out.is_empty() => return Ok(Vec::new()),
+            Err(e) => return Err(StorageError::Backend(e)),
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
 }
 
 /// Validates an object name before it's handed to the backend.

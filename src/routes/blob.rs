@@ -163,7 +163,10 @@ fn chunk_index_from_query(query: &UploadQuery) -> Result<u64, Response> {
     }
 }
 
-async fn download(State(state): State<AppState>, Path(cache_entry_id): Path<String>) -> Response {
+pub(crate) async fn download(
+    State(state): State<AppState>,
+    Path(cache_entry_id): Path<String>,
+) -> Response {
     let location = match state.db.find_location_for_entry(&cache_entry_id).await {
         Ok(Some(l)) => l,
         Ok(None) => return not_found("Cache file not found"),

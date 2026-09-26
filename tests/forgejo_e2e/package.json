@@ -1,0 +1,9 @@
+{
+  "name": "gha-cache-oxide-forgejo-e2e",
+  "private": true,
+  "description": "Drives @actions/cache through forgejo-runner's cache proxy against oxide. See README.md.",
+  "dependencies": {
+    "@actions/cache": "4.1.0",
+    "actions-cache-6": "npm:@actions/cache@6.2.0"
+  }
+}

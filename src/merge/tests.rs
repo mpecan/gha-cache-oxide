@@ -390,6 +390,17 @@ impl StorageAdapter for GatedMergedUpload {
         self.inner.count_files_in_folder(folder_name).await
     }
 
+    async fn list_folder(
+        &self,
+        folder_name: &str,
+    ) -> Result<Vec<crate::storage::ObjectInfo>, StorageError> {
+        self.inner.list_folder(folder_name).await
+    }
+
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        self.inner.copy(from, to).await
+    }
+
     async fn signed_url(&self, object_name: &str) -> Result<Option<url::Url>, StorageError> {
         self.inner.signed_url(object_name).await
     }
@@ -425,6 +436,17 @@ impl StorageAdapter for FailOnDeleteFolder {
 
     async fn count_files_in_folder(&self, folder_name: &str) -> Result<u64, StorageError> {
         self.inner.count_files_in_folder(folder_name).await
+    }
+
+    async fn list_folder(
+        &self,
+        folder_name: &str,
+    ) -> Result<Vec<crate::storage::ObjectInfo>, StorageError> {
+        self.inner.list_folder(folder_name).await
+    }
+
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        self.inner.copy(from, to).await
     }
 
     async fn signed_url(&self, object_name: &str) -> Result<Option<url::Url>, StorageError> {
@@ -465,6 +487,17 @@ impl StorageAdapter for FailOnMergedUpload {
 
     async fn count_files_in_folder(&self, folder_name: &str) -> Result<u64, StorageError> {
         self.inner.count_files_in_folder(folder_name).await
+    }
+
+    async fn list_folder(
+        &self,
+        folder_name: &str,
+    ) -> Result<Vec<crate::storage::ObjectInfo>, StorageError> {
+        self.inner.list_folder(folder_name).await
+    }
+
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        self.inner.copy(from, to).await
     }
 
     async fn signed_url(&self, object_name: &str) -> Result<Option<url::Url>, StorageError> {

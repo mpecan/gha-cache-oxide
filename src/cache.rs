@@ -10,6 +10,8 @@
 //!   storage-health probe and FK-cascade purge primitives used by the
 //!   download path's purge-and-retry loop (#72).
 
+pub(crate) mod chunked;
+
 use crate::db::Db;
 use crate::db::entities::{CacheEntry, CacheEntryCoord, Upload};
 use crate::db::id::new_uuid;
@@ -84,13 +86,36 @@ pub(crate) async fn complete_upload(
     validate_upload_counts(db, &upload).await?;
     validate_disk_parts(db, adapter, &upload).await?;
 
-    let previous = commit_upload_tx(db, &upload, &params).await?;
+    let outcome = commit_upload_tx(
+        db,
+        &upload,
+        params.coord,
+        upload.finished_part_upload_count,
+        params.now_ms,
+    )
+    .await?;
+    let CommitTxOutcome::Committed(previous) = outcome else {
+        return Err(CompleteUploadError::UploadNotFound);
+    };
+    delete_superseded_folder(adapter, previous, &upload.folder_name).await;
+    Ok(upload)
+}
 
-    // Post-commit cleanup of the superseded blob folder. Failure here
-    // does not un-do the commit — the row is already repointed — so we
-    // log and continue. Upstream does the same (fire-and-forget
-    // `adapter.deleteFolder` inside the tx callback, storage.ts:189).
+/// Post-commit cleanup of the superseded blob folder. Failure here
+/// does not un-do the commit — the row is already repointed — so we
+/// log and continue. Upstream does the same (fire-and-forget
+/// `adapter.deleteFolder` inside the tx callback, storage.ts:189).
+///
+/// `committed_folder` is never deleted, even if the superseded
+/// location names it: upload ids (and so folder names) are random, and
+/// deleting the folder the entry now points at would destroy it.
+async fn delete_superseded_folder(
+    adapter: &dyn StorageAdapter,
+    previous: Option<crate::db::entities::PreviousLocation>,
+    committed_folder: &str,
+) {
     if let Some(prev) = previous
+        && prev.folder_name != committed_folder
         && let Err(e) = adapter.delete_folder(&prev.folder_name).await
     {
         tracing::warn!(
@@ -99,8 +124,6 @@ pub(crate) async fn complete_upload(
             "failed to delete superseded upload folder; storage row already removed",
         );
     }
-
-    Ok(upload)
 }
 
 async fn validate_upload_counts(db: &dyn Db, upload: &Upload) -> Result<(), CompleteUploadError> {
@@ -135,25 +158,40 @@ async fn validate_disk_parts(
     Ok(())
 }
 
-/// Performs the commit transaction. Returns the previous
-/// `storage_location` (if any) so the caller can delete the
-/// corresponding blob folder post-commit.
+/// Outcome of [`commit_upload_tx`].
+enum CommitTxOutcome {
+    /// Committed; carries the superseded location (if any) so the caller
+    /// can delete its blob folder.
+    Committed(Option<crate::db::entities::PreviousLocation>),
+    /// The `uploads` row was already gone — a concurrent commit (a
+    /// client retry) or `cleanup:uploads` consumed it first. Nothing was
+    /// written.
+    UploadGone,
+}
+
+/// Performs the commit transaction.
+///
+/// Deleting the `uploads` row comes first and doubles as the claim: of
+/// two overlapping commits for the same upload only one removes the
+/// row; the other rolls back without touching `cache_entries`.
 async fn commit_upload_tx(
     db: &dyn Db,
     upload: &Upload,
-    params: &CompleteUploadParams<'_>,
-) -> Result<Option<crate::db::entities::PreviousLocation>, CompleteUploadError> {
+    coord: CacheEntryCoord<'_>,
+    part_count: i64,
+    now_ms: i64,
+) -> Result<CommitTxOutcome, sqlx::Error> {
     let mut tx = db.begin().await?;
+    if !tx.delete_upload(upload.id).await? {
+        tx.rollback().await?;
+        return Ok(CommitTxOutcome::UploadGone);
+    }
     let new_location_id = new_uuid();
-    tx.insert_storage_location(
-        &new_location_id,
-        &upload.folder_name,
-        upload.finished_part_upload_count,
-    )
-    .await?;
+    tx.insert_storage_location(&new_location_id, &upload.folder_name, part_count)
+        .await?;
 
     let previous = tx
-        .upsert_cache_entry(params.coord, &new_location_id, params.now_ms)
+        .upsert_cache_entry(coord, &new_location_id, now_ms)
         .await?;
 
     if let Some(prev) = &previous {
@@ -163,10 +201,8 @@ async fn commit_upload_tx(
         tx.delete_storage_location(&prev.id).await?;
     }
 
-    tx.delete_upload(upload.id).await?;
-
     tx.commit().await?;
-    Ok(previous)
+    Ok(CommitTxOutcome::Committed(previous))
 }
 
 /// Caps the storage-probe loop at three attempts per request. Mirrors

@@ -138,12 +138,21 @@ impl Db for MysqlDb {
         Ok(())
     }
 
-    async fn delete_upload(&self, id: i64) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM uploads WHERE id = ?")
+    async fn touch_upload(&self, id: i64, now_ms: i64) -> Result<bool, sqlx::Error> {
+        let done = sqlx::query("UPDATE uploads SET `lastPartUploadedAt` = ? WHERE id = ?")
+            .bind(now_ms)
             .bind(id)
             .execute(&self.pool)
             .await?;
-        Ok(())
+        Ok(done.rows_affected() == 1)
+    }
+
+    async fn delete_upload(&self, id: i64) -> Result<bool, sqlx::Error> {
+        let done = sqlx::query("DELETE FROM uploads WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() == 1)
     }
 
     async fn find_location_for_entry(
@@ -553,12 +562,12 @@ impl DbTx for MysqlTx<'_> {
         Ok(())
     }
 
-    async fn delete_upload(&mut self, id: i64) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM uploads WHERE id = ?")
+    async fn delete_upload(&mut self, id: i64) -> Result<bool, sqlx::Error> {
+        let done = sqlx::query("DELETE FROM uploads WHERE id = ?")
             .bind(id)
             .execute(&mut *self.tx)
             .await?;
-        Ok(())
+        Ok(done.rows_affected() == 1)
     }
 
     async fn delete_upload_if_stale(

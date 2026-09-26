@@ -194,8 +194,17 @@ async fn collect(mut s: ByteStream) -> Vec<u8> {
 // Scenarios — each tests one trait-level contract.
 // ------------------------------------------------------------------------
 
+// Some scenario groups live in sibling files to keep this one under the
+// 700-line hard limit; they are re-exported through `scenarios`.
+#[path = "storage_conformance_scenarios/list_copy.rs"]
+mod list_copy;
+#[path = "storage_conformance_scenarios/signed_url.rs"]
+mod signed_url;
+
 pub mod scenarios {
     use super::{Harness, StorageError, bytes_stream, collect};
+    pub use crate::list_copy::*;
+    pub use crate::signed_url::*;
 
     pub async fn round_trip_zero_bytes(h: &Harness) {
         h.adapter
@@ -394,45 +403,6 @@ pub mod scenarios {
         );
     }
 
-    /// `signed_url` must be `None` for backends that cannot sign (the
-    /// server proxies the download) and `Some(_)` for backends that can
-    /// (the client goes direct). `Harness::signs_urls` says which.
-    ///
-    /// For signing backends, the returned URL must be directly fetchable —
-    /// issue #12's acceptance criterion: "`signed_url` returns a URL that
-    /// `reqwest::get` can fetch". We upload `"content"` and assert the
-    /// downloaded body matches byte-for-byte.
-    pub async fn signed_url_matches_capability(h: &Harness) {
-        let payload = b"content";
-        h.adapter
-            .upload_stream("obj", bytes_stream(payload.to_vec()))
-            .await
-            .unwrap();
-        let got = h.adapter.signed_url("obj").await.unwrap();
-        if h.signs_urls {
-            let url = got.expect("signs_urls=true backend must return Some(url)");
-            let resp = reqwest::get(url.clone())
-                .await
-                .unwrap_or_else(|e| panic!("reqwest::get({url}) failed: {e}"));
-            assert!(resp.status().is_success(), "GET {url} -> {}", resp.status());
-            let body = resp.bytes().await.unwrap();
-            assert_eq!(&body[..], payload, "signed URL returned wrong body");
-        } else {
-            assert!(
-                got.is_none(),
-                "signs_urls=false backend must return None, got {got:?}"
-            );
-        }
-    }
-
-    pub async fn signed_url_validates_object_name(h: &Harness) {
-        match h.adapter.signed_url("../evil").await {
-            Err(StorageError::InvalidObjectName { .. }) => {}
-            Err(other) => panic!("expected InvalidObjectName, got {other:?}"),
-            Ok(_) => panic!("expected Err, got Ok"),
-        }
-    }
-
     /// Each trait method routes its name through `validate_object_name`
     /// before touching the backend; empty names must round-trip the
     /// dedicated `InvalidObjectName { reason: "empty" }` variant. Pins
@@ -518,6 +488,11 @@ pub async fn run_conformance_suite(adapter: Arc<dyn StorageAdapter>, signs_urls:
     run!(signed_url_matches_capability);
     run!(signed_url_validates_object_name);
     run!(rejects_empty_object_name);
+    run!(list_folder_returns_sorted_relative_names_with_sizes);
+    run!(list_missing_folder_is_empty);
+    run!(copy_duplicates_object);
+    run!(copy_missing_source_is_object_not_found);
+    run!(copy_rejects_traversal);
 }
 
 // ------------------------------------------------------------------------
@@ -599,6 +574,11 @@ storage_conformance_cases!(
     signed_url_matches_capability,
     signed_url_validates_object_name,
     rejects_empty_object_name,
+    list_folder_returns_sorted_relative_names_with_sizes,
+    list_missing_folder_is_empty,
+    copy_duplicates_object,
+    copy_missing_source_is_object_not_found,
+    copy_rejects_traversal,
 );
 
 storage_conformance_cases!(
@@ -622,6 +602,11 @@ storage_conformance_cases!(
     signed_url_matches_capability,
     signed_url_validates_object_name,
     rejects_empty_object_name,
+    list_folder_returns_sorted_relative_names_with_sizes,
+    list_missing_folder_is_empty,
+    copy_duplicates_object,
+    copy_missing_source_is_object_not_found,
+    copy_rejects_traversal,
 );
 
 // Two scenarios are intentionally omitted from the GCS driver,
@@ -659,6 +644,11 @@ storage_conformance_cases!(
     prefix_matching_is_segment_aware,
     signed_url_validates_object_name,
     rejects_empty_object_name,
+    list_folder_returns_sorted_relative_names_with_sizes,
+    list_missing_folder_is_empty,
+    copy_duplicates_object,
+    copy_missing_source_is_object_not_found,
+    copy_rejects_traversal,
 );
 
 // ------------------------------------------------------------------------

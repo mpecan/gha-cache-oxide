@@ -202,6 +202,15 @@ impl StorageAdapter for SigningFilesystem {
     async fn count_files_in_folder(&self, folder_name: &str) -> Result<u64, StorageError> {
         self.inner.count_files_in_folder(folder_name).await
     }
+    async fn list_folder(
+        &self,
+        folder_name: &str,
+    ) -> Result<Vec<gha_cache_oxide::storage::ObjectInfo>, StorageError> {
+        self.inner.list_folder(folder_name).await
+    }
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        self.inner.copy(from, to).await
+    }
     async fn signed_url(&self, _object_name: &str) -> Result<Option<Url>, StorageError> {
         Ok(Some(SIGNED_URL.parse().unwrap()))
     }
@@ -238,6 +247,15 @@ impl StorageAdapter for FailingSigner {
     }
     async fn count_files_in_folder(&self, folder_name: &str) -> Result<u64, StorageError> {
         self.inner.count_files_in_folder(folder_name).await
+    }
+    async fn list_folder(
+        &self,
+        folder_name: &str,
+    ) -> Result<Vec<gha_cache_oxide::storage::ObjectInfo>, StorageError> {
+        self.inner.list_folder(folder_name).await
+    }
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        self.inner.copy(from, to).await
     }
     async fn signed_url(&self, _object_name: &str) -> Result<Option<Url>, StorageError> {
         Err(StorageError::Io(std::io::Error::other("signer offline")))
