@@ -3,14 +3,13 @@
 //! not a trait-level invariant.
 //!
 //! All tests in this binary require a live S3-compatible endpoint
-//! (`MinIO` in CI, Garage locally, a real bucket in a parity sweep).
-//! They are
-//! `#[ignore]`'d so a default `cargo test` never touches the network.
+//! (Garage in CI and locally, a real bucket in a parity sweep). They
+//! are `#[ignore]`'d so a default `cargo test` never touches the
+//! network.
 //!
 //! ```sh
-//! S3_TEST_ENDPOINT=http://localhost:9000 \
-//! S3_TEST_ACCESS_KEY=minioadmin \
-//! S3_TEST_SECRET_KEY=minioadmin \
+//! eval "$(.github/scripts/start-garage.sh | sed 's/^/export /')"
+//! S3_TEST_ENDPOINT=http://localhost:3900 \
 //!   cargo test --test s3_adapter -- --ignored
 //! ```
 
@@ -40,7 +39,7 @@ use url::Url;
 #[ignore = "requires S3_TEST_ENDPOINT + a running S3 endpoint; `cargo test --test s3_adapter -- --ignored`"]
 async fn s3_missing_bucket_produces_clear_error() {
     let endpoint = std::env::var("S3_TEST_ENDPOINT")
-        .expect("S3_TEST_ENDPOINT must be set; start MinIO and re-run `cargo test -- --ignored`");
+        .expect("S3_TEST_ENDPOINT must be set; start an S3 endpoint (.github/scripts/start-garage.sh) and re-run `cargo test -- --ignored`");
     let access_key =
         std::env::var("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string());
     let secret_key =
