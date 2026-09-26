@@ -215,8 +215,10 @@ pub(super) async fn upload(
     };
 
     let f = &state.metrics.forgejo;
-    // Touch before streaming so `cleanup:uploads` (60 s staleness)
-    // never reaps an upload whose first chunk is still in flight.
+    // Touch before streaming so `cleanup:uploads` (60 s since the last
+    // touch) does not reap an upload whose first chunk is in flight. A
+    // single chunk streaming for longer than that with nothing else
+    // touching can still be reaped; the PATCH then answers 404.
     match state.db.touch_upload(upload.id, now_ms()).await {
         Ok(true) => {}
         Ok(false) => return not_reserved(upload.id),

@@ -194,8 +194,17 @@ async fn collect(mut s: ByteStream) -> Vec<u8> {
 // Scenarios — each tests one trait-level contract.
 // ------------------------------------------------------------------------
 
+// Some scenario groups live in sibling files to keep this one under the
+// 700-line hard limit; they are re-exported through `scenarios`.
+#[path = "storage_conformance_scenarios/list_copy.rs"]
+mod list_copy;
+#[path = "storage_conformance_scenarios/signed_url.rs"]
+mod signed_url;
+
 pub mod scenarios {
     use super::{Harness, StorageError, bytes_stream, collect};
+    pub use crate::list_copy::*;
+    pub use crate::signed_url::*;
 
     pub async fn round_trip_zero_bytes(h: &Harness) {
         h.adapter
@@ -392,112 +401,6 @@ pub mod scenarios {
             1,
             "delete_folder(\"parts\") must not touch 'parts-foo'"
         );
-    }
-
-    /// `signed_url` must be `None` for backends that cannot sign (the
-    /// server proxies the download) and `Some(_)` for backends that can
-    /// (the client goes direct). `Harness::signs_urls` says which.
-    ///
-    /// For signing backends, the returned URL must be directly fetchable —
-    /// issue #12's acceptance criterion: "`signed_url` returns a URL that
-    /// `reqwest::get` can fetch". We upload `"content"` and assert the
-    /// downloaded body matches byte-for-byte.
-    pub async fn signed_url_matches_capability(h: &Harness) {
-        let payload = b"content";
-        h.adapter
-            .upload_stream("obj", bytes_stream(payload.to_vec()))
-            .await
-            .unwrap();
-        let got = h.adapter.signed_url("obj").await.unwrap();
-        if h.signs_urls {
-            let url = got.expect("signs_urls=true backend must return Some(url)");
-            let resp = reqwest::get(url.clone())
-                .await
-                .unwrap_or_else(|e| panic!("reqwest::get({url}) failed: {e}"));
-            assert!(resp.status().is_success(), "GET {url} -> {}", resp.status());
-            let body = resp.bytes().await.unwrap();
-            assert_eq!(&body[..], payload, "signed URL returned wrong body");
-        } else {
-            assert!(
-                got.is_none(),
-                "signs_urls=false backend must return None, got {got:?}"
-            );
-        }
-    }
-
-    pub async fn signed_url_validates_object_name(h: &Harness) {
-        match h.adapter.signed_url("../evil").await {
-            Err(StorageError::InvalidObjectName { .. }) => {}
-            Err(other) => panic!("expected InvalidObjectName, got {other:?}"),
-            Ok(_) => panic!("expected Err, got Ok"),
-        }
-    }
-
-    pub async fn list_folder_returns_sorted_relative_names_with_sizes(h: &Harness) {
-        // Upload out of order; the listing must come back name-sorted
-        // (the Forgejo v1 commit path relies on that to order chunks).
-        for (name, len) in [
-            ("chunks/0000000000000010", 3_usize),
-            ("chunks/0000000000000000", 16),
-        ] {
-            h.adapter
-                .upload_stream(name, bytes_stream(vec![7; len]))
-                .await
-                .unwrap();
-        }
-        h.adapter
-            .upload_stream("chunks-sibling/x", bytes_stream(vec![0]))
-            .await
-            .unwrap();
-
-        let listed = h.adapter.list_folder("chunks").await.unwrap();
-        let got: Vec<(&str, u64)> = listed.iter().map(|o| (o.name.as_str(), o.size)).collect();
-        assert_eq!(
-            got,
-            vec![("0000000000000000", 16), ("0000000000000010", 3)],
-            "segment-aware, sorted, relative names with sizes"
-        );
-    }
-
-    pub async fn list_missing_folder_is_empty(h: &Harness) {
-        assert!(
-            h.adapter
-                .list_folder("no-such-dir")
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    pub async fn copy_duplicates_object(h: &Harness) {
-        h.adapter
-            .upload_stream("src/a", bytes_stream(b"payload".to_vec()))
-            .await
-            .unwrap();
-        h.adapter.copy("src/a", "dst/b").await.unwrap();
-
-        let copied = collect(h.adapter.download_stream("dst/b").await.unwrap()).await;
-        assert_eq!(copied, b"payload");
-        let original = collect(h.adapter.download_stream("src/a").await.unwrap()).await;
-        assert_eq!(original, b"payload", "copy must leave the source in place");
-    }
-
-    pub async fn copy_missing_source_is_object_not_found(h: &Harness) {
-        match h.adapter.copy("nope/a", "dst/b").await {
-            Err(StorageError::ObjectNotFound(_)) => {}
-            other => panic!("expected ObjectNotFound, got {other:?}"),
-        }
-    }
-
-    pub async fn copy_rejects_traversal(h: &Harness) {
-        for (from, to) in [("../a", "b"), ("a", "../b")] {
-            match h.adapter.copy(from, to).await {
-                Err(StorageError::InvalidObjectName { .. }) => {}
-                other => {
-                    panic!("copy({from:?}, {to:?}): expected InvalidObjectName, got {other:?}")
-                }
-            }
-        }
     }
 
     /// Each trait method routes its name through `validate_object_name`

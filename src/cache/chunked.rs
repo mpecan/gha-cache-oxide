@@ -144,8 +144,16 @@ pub async fn complete_chunked_upload(
     expected_size: Option<u64>,
     now_ms: i64,
 ) -> Result<u64, ChunkedCommitError> {
+    // Refresh `lastPartUploadedAt` so `cleanup:uploads` leaves the
+    // upload alone while the (possibly slow, on S3) copies run.
+    if !db.touch_upload(upload.id, now_ms).await? {
+        return Err(ChunkedCommitError::UploadGone);
+    }
     let chunks_folder = format!("{}/chunks", upload.folder_name);
-    let chunks = adapter.list_folder(&chunks_folder).await?;
+    let chunks = match adapter.list_folder(&chunks_folder).await {
+        Ok(c) => c,
+        Err(e) => return Err(storage_or_gone(db, upload, e).await),
+    };
     let layout = validate_chunk_layout(&chunks, expected_size).and_then(|total| {
         let n = i64::try_from(chunks.len())
             .map_err(|_| ChunkedCommitError::TooManyChunks(chunks.len()))?;
@@ -156,7 +164,9 @@ pub async fn complete_chunked_upload(
         Err(e) => return Err(discard_upload(db, adapter, upload, e).await),
     };
 
-    copy_chunks_to_parts(adapter, &upload.folder_name, &chunks).await?;
+    if let Err(e) = copy_chunks_to_parts(adapter, &upload.folder_name, &chunks).await {
+        return Err(storage_or_gone(db, upload, e).await);
+    }
 
     let coord = CacheEntryCoord {
         key: &upload.key,
@@ -204,6 +214,20 @@ async fn copy_chunks_to_parts(
         .buffer_unordered(COPY_CONCURRENCY)
         .try_collect::<()>()
         .await
+}
+
+/// A storage error while listing / copying is usually a concurrent
+/// commit of the same upload having deleted `chunks/` under us (the
+/// data is safe — it committed). Report that as [`UploadGone`] (404)
+/// rather than a 500 that tells the client its save failed.
+///
+/// [`UploadGone`]: ChunkedCommitError::UploadGone
+async fn storage_or_gone(db: &dyn Db, upload: &Upload, err: StorageError) -> ChunkedCommitError {
+    match db.find_upload_by_id(upload.id).await {
+        Ok(None) => ChunkedCommitError::UploadGone,
+        Ok(Some(_)) => err.into(),
+        Err(e) => e.into(),
+    }
 }
 
 /// Rejects the upload: deletes its row and, only if that delete is what

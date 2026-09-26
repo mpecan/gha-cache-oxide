@@ -105,6 +105,15 @@ upstream only in the following deliberate, tested ways:
   "merged file deleted while parts/* still exist" is intentionally not
   caught by this coarse probe; that's the lazy-merge path's territory.
 
+- **Overlapping `FinalizeCacheEntryUpload` calls commit once.** The
+  commit transaction claims the `uploads` row first; of two finalizes
+  racing for the same upload (a client retry while the first is still
+  running) exactly one commits and the other gets `not_found`. Upstream
+  lets both through, and the second then deletes the folder the entry
+  points at as "superseded", losing the cache. Pinned by
+  `concurrent_finalize_commits_once_and_keeps_blobs` in
+  `src/cache_tests.rs`.
+
 ## Forgejo runner cache (v1 `_apis/artifactcache`)
 
 Forgejo runners send cache traffic to an external server only through

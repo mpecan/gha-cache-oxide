@@ -136,6 +136,9 @@ async fn cleanup_reaps_abandoned_chunked_upload() {
     assert_eq!(r.commit(id, Some(100)).await, StatusCode::NOT_FOUND);
 }
 
+/// The upload is older than the staleness cutoff; only the touch from a
+/// recent chunk keeps it alive. (Without the touch this is exactly
+/// `cleanup_reaps_abandoned_chunked_upload`.)
 #[tokio::test]
 async fn cleanup_keeps_upload_that_is_receiving_chunks() {
     let (srv, r) = setup().await;
@@ -144,11 +147,17 @@ async fn cleanup_keeps_upload_that_is_receiving_chunks() {
         r.patch(id, "bytes 0-99/*", vec![0; 100]).await,
         StatusCode::OK
     );
-    // A chunk touched 30 s before the cleanup clock is within the 60 s window.
-    let now = chrono::Utc::now().timestamp_millis() + 30_000;
-    let report =
-        gha_cache_oxide::tasks::cleanup::run_all(srv.db.as_ref(), srv.storage.as_ref(), now, 90)
-            .await;
+    let now = chrono::Utc::now().timestamp_millis();
+    // Cleanup at now+90 s → cutoff now+30 s: createdAt (now) is stale,
+    // but a chunk touched at now+60 s is inside the window.
+    assert!(srv.db.touch_upload(id, now + 60_000).await.unwrap());
+    let report = gha_cache_oxide::tasks::cleanup::run_all(
+        srv.db.as_ref(),
+        srv.storage.as_ref(),
+        now + 90_000,
+        90,
+    )
+    .await;
     assert_eq!(report.uploads_deleted, 0);
     assert_eq!(r.commit(id, Some(100)).await, StatusCode::OK);
 }
