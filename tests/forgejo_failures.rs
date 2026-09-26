@@ -172,3 +172,45 @@ async fn cleanup_keeps_upload_that_is_receiving_chunks() {
     assert_eq!(report.uploads_deleted, 0);
     assert_eq!(r.commit(id, Some(100)).await, StatusCode::OK);
 }
+
+/// Regression: every v1 commit is merged in the background, which sets
+/// `mergeStartedAt`. The never-downloaded expiry must still reap such
+/// entries (it once excluded any row with `mergeStartedAt` set, so no
+/// Forgejo entry could ever expire).
+#[tokio::test]
+async fn unused_expiry_reaps_background_merged_v1_entries() {
+    let (srv, r) = setup().await;
+    let id = r.reserve("never_restored", VERSION, 100).await;
+    assert_eq!(
+        r.patch(id, "bytes 0-99/*", vec![7; 100]).await,
+        StatusCode::OK
+    );
+    assert_eq!(r.commit(id, Some(100)).await, StatusCode::OK);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while srv.metrics.merges.completed.get() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background merge never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let eight_days_later = chrono::Utc::now().timestamp_millis() + 8 * 86_400_000;
+    let retention = EntryRetention {
+        older_than_days: 30,
+        unused_older_than_days: Some(7),
+    };
+    let report = gha_cache_oxide::tasks::cleanup::run_all(
+        srv.db.as_ref(),
+        srv.storage.as_ref(),
+        eight_days_later,
+        retention,
+    )
+    .await;
+    assert_eq!(report.entries_deleted, 1);
+    assert_eq!(
+        r.find("never_restored", VERSION).await.0,
+        StatusCode::NO_CONTENT
+    );
+}

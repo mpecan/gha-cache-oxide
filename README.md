@@ -166,8 +166,23 @@ Write-isolated PR caches and superseded keys are often saved and never
 restored; set `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` (see
 [Configuration](#configuration)) if they should not accumulate.
 
+Every v1 commit starts a **background merge** of the entry's parts into
+its single `merged` blob, so the first restore is one sequential read
+instead of a merge performed inline at the client's pace (measured ~5×
+slower on Garage). A download that arrives before the merge finishes
+waits for it (then streams `merged`) — up to 60 s, after which it gets
+`503` + `Retry-After` and `@actions/cache` retries; a failed merge
+falls back to the usual lazy merge on first download. Graceful shutdown waits for
+in-flight merges — give the pod a termination grace period long enough
+for your largest entry (e.g. 60 s), or a killed merge's claim blocks
+that entry's downloads until the startup sweep clears it (1 h). The
+v2 surface keeps upstream's merge-on-first-download.
+
 Prometheus counters for the dialect are served at `GET /metrics`
-(`gha_cache_oxide_forgejo_{cache_lookups,upload_bytes,download_bytes,upload_errors,commits,commit_errors,auth_failures}_total`).
+(`gha_cache_oxide_forgejo_{cache_lookups,upload_bytes,download_bytes,upload_errors,commits,commit_errors,auth_failures}_total`),
+plus `gha_cache_oxide_merges_total{result}` and the
+`gha_cache_oxide_merge_duration_seconds` histogram (all merges, lazy or
+background).
 
 Tests: `tests/forgejo.rs` ports act's `handler_test.go`; the manual
 end-to-end harness in [`tests/forgejo_e2e/`](./tests/forgejo_e2e) drives

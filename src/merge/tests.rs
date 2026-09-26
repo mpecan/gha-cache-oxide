@@ -14,7 +14,7 @@ use crate::db::entities::CacheEntryCoord;
 use crate::db::id::new_uuid;
 use crate::storage::FilesystemAdapter;
 
-async fn harness() -> (Arc<dyn Db>, Arc<FilesystemAdapter>, TempDir) {
+pub(super) async fn harness() -> (Arc<dyn Db>, Arc<FilesystemAdapter>, TempDir) {
     let tmp = TempDir::new().unwrap();
     let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
@@ -23,7 +23,7 @@ async fn harness() -> (Arc<dyn Db>, Arc<FilesystemAdapter>, TempDir) {
     (db, adapter, tmp)
 }
 
-async fn seed_location_with_parts(
+pub(super) async fn seed_location_with_parts(
     db: &dyn Db,
     adapter: &dyn StorageAdapter,
     folder: &str,
@@ -65,7 +65,7 @@ async fn seed_location_with_parts(
 /// Fetches the `storage_location` row by id, using the `SQLite`-only
 /// escape hatch on the test harness. Tests thread this around instead
 /// of re-implementing a trait extension.
-async fn location(db: &dyn Db, location_id: &str) -> StorageLocation {
+pub(super) async fn location(db: &dyn Db, location_id: &str) -> StorageLocation {
     let pool = db
         .as_sqlite_pool()
         .expect("tests use SQLite harness exclusively");
@@ -353,9 +353,9 @@ async fn merger_resets_flags_when_upload_fails() {
 /// the inner filesystem adapter unchanged. Used to make the merger's
 /// upload genuinely slow so the shutdown-awaits-merge test isn't
 /// timing-dependent.
-struct GatedMergedUpload {
-    inner: Arc<FilesystemAdapter>,
-    release: Arc<tokio::sync::Notify>,
+pub(super) struct GatedMergedUpload {
+    pub(super) inner: Arc<FilesystemAdapter>,
+    pub(super) release: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait]

@@ -58,6 +58,10 @@
 //!   non-zero (the client treats a falsy id as a failed reserve). The
 //!   same UUID also works on the unauthenticated v2 `/download/{id}`
 //!   route — ids are capabilities there, as in upstream.
+//! - Commit starts a background merge of the new entry (act has one
+//!   file per cache and nothing to merge; oxide's v2 surface merges
+//!   lazily on first download, like upstream). See
+//!   `merge::start_background_merge`.
 //! - Downloads stream without `Content-Length` and without `Range`
 //!   support (act uses `http.ServeFile`). `@actions/cache` v1 only uses
 //!   Range against Azure hosts, so restores are unaffected, but its

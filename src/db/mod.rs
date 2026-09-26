@@ -581,9 +581,13 @@ pub trait DbTx: Send {
     async fn delete_storage_location(&mut self, id: &str) -> Result<(), sqlx::Error>;
 
     /// Deletes a `storage_locations` row only if it is still unused:
-    /// never downloaded and no lazy merge started. Returns `true` when
-    /// it deleted. The unused-entries cleanup pass uses this so a first
-    /// restore that lands between its page query and the delete wins.
+    /// never downloaded and no merge *in flight* (`mergeStartedAt` unset,
+    /// or the merge already finished — the post-commit background merge
+    /// leaves every entry merged, and `mark_merged` does not clear
+    /// `mergeStartedAt`). Returns `true` when it deleted. The
+    /// unused-entries cleanup pass uses this so a first restore (and the
+    /// lazy merge it starts) landing between its page query and the
+    /// delete wins.
     ///
     /// # Errors
     /// Returns `sqlx::Error` on delete failure.

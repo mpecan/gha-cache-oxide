@@ -129,9 +129,10 @@ async fn run_pass(db: &dyn Db, storage: &dyn StorageAdapter, selector: Selector)
         for location in page {
             match delete_one(db, storage, selector, &location).await {
                 Ok(true) => deleted += 1,
-                // Kept because it is in use now; it is no longer in the
-                // unused set, so the offset needs no adjustment.
-                Ok(false) => {}
+                // Kept (in use, or merging right now). It may still match
+                // the page query, so step past it like a failure — else a
+                // full page of kept rows would be re-read forever.
+                Ok(false) => iter_failures += 1,
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -187,7 +188,7 @@ enum EntriesCleanupError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::test_utils::FakeStorage;
     use super::{EntryRetention, cutoff_ms, run};
@@ -457,6 +458,47 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    /// Rows the unused pass keeps (here: a merge in flight) still match
+    /// its page query. More than a page of them must not re-read the
+    /// same page forever.
+    #[tokio::test]
+    async fn unused_pass_terminates_when_a_full_page_is_kept() {
+        let db = fresh_db().await;
+        let storage = FakeStorage::new();
+        let n = usize::try_from(super::PAGE_SIZE).unwrap() + 3;
+        for i in 0..n {
+            let loc = format!("merging-{i}");
+            seed_committed(&db, &loc, 0).await;
+            assert!(db.try_mark_merge_started(&loc, 1).await.unwrap());
+        }
+        let now = 1_000 * DAY_MS;
+        let deleted = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(&db, &storage, now, unused(30, 7)),
+        )
+        .await
+        .expect("unused pass must terminate");
+        assert_eq!(deleted, 0);
+    }
+
+    /// The post-commit background merge leaves never-downloaded entries
+    /// merged (`mergeStartedAt` and `mergedAt` both set); they must still
+    /// expire.
+    #[tokio::test]
+    async fn unused_pass_reaps_merged_never_downloaded_entries() {
+        let db = fresh_db().await;
+        let storage = FakeStorage::new();
+        seed_committed(&db, "merged-unused", 0).await;
+        assert!(db.try_mark_merge_started("merged-unused", 1).await.unwrap());
+        db.mark_merged("merged-unused", 2).await.unwrap();
+        let now = 1_000 * DAY_MS;
+        assert_eq!(run(&db, &storage, now, unused(30, 7)).await, 1);
+        assert_eq!(
+            storage.deleted_folders(),
+            vec!["folder-merged-unused".to_string()]
         );
     }
 }
