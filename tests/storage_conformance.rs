@@ -77,12 +77,13 @@ async fn filesystem_setup() -> SetupResult {
 }
 
 /// S3 setup for the conformance suite. Reads connection details from
-/// env so the same adapter can run against `MinIO` in CI, Garage in dev,
+/// env so the same adapter can run against Garage in CI and dev,
 /// or a live AWS bucket in a parity sweep.
 ///
 /// # Required env
 /// - `S3_TEST_ENDPOINT` — URL of the S3-compatible server
-///   (`http://localhost:9000` for `MinIO`).
+///   (`http://localhost:3900` for Garage; start one with
+///   `.github/scripts/start-garage.sh`, which also prints the key env vars).
 ///
 /// # Optional env (with defaults)
 /// - `S3_TEST_BUCKET` (default `gha-cache-test`) — must exist; tests
@@ -97,7 +98,7 @@ async fn filesystem_setup() -> SetupResult {
 /// never reaches this path.
 async fn s3_setup() -> SetupResult {
     let endpoint = std::env::var("S3_TEST_ENDPOINT")
-        .expect("S3_TEST_ENDPOINT must be set; start MinIO and re-run `cargo test -- --ignored`");
+        .expect("S3_TEST_ENDPOINT must be set; start an S3 endpoint (.github/scripts/start-garage.sh) and re-run `cargo test -- --ignored`");
     let bucket = std::env::var("S3_TEST_BUCKET").unwrap_or_else(|_| "gha-cache-test".to_string());
     let access_key =
         std::env::var("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string());
@@ -551,7 +552,7 @@ macro_rules! storage_conformance_cases {
         }
     };
     // Ignored form: each generated test gets `#[ignore = $reason]`. Used
-    // for drivers that need external services (MinIO, live AWS) — the
+    // for drivers that need external services (Garage, live AWS) — the
     // operator opts in via `cargo test -- --ignored`. The body is
     // duplicated from the plain arm because macro_rules! can't lift a
     // repeating attribute list out of an outer scenario loop cleanly.
@@ -603,7 +604,7 @@ storage_conformance_cases!(
 storage_conformance_cases!(
     s3,
     s3_setup,
-    ignore: "requires S3_TEST_ENDPOINT + running MinIO; `cargo test -- --ignored`",
+    ignore: "requires S3_TEST_ENDPOINT + a running S3 endpoint; `cargo test -- --ignored`",
     round_trip_zero_bytes,
     round_trip_small_payload,
     round_trip_crosses_buffer_flush,
@@ -631,7 +632,7 @@ storage_conformance_cases!(
 //   with the `disable_oauth: true` SA fixture (the only shape that
 //   makes XML-API uploads succeed), and that fixture has no private
 //   key — so `signed_url(...)` can't sign. Both the `s3` driver
-//   (MinIO) and unit tests in `src/storage/gcs.rs::tests` keep this
+//   (Garage) and unit tests in `src/storage/gcs.rs::tests` keep this
 //   surface covered.
 // - `round_trip_crosses_buffer_flush`: triggers `BufWriter`'s XML-API
 //   multipart upload (`POST ?uploads=`), which fake-gcs-server does
@@ -673,7 +674,7 @@ async fn runner_executes_full_suite_against_filesystem() {
 }
 
 #[tokio::test]
-#[ignore = "requires S3_TEST_ENDPOINT + running MinIO; `cargo test -- --ignored`"]
+#[ignore = "requires S3_TEST_ENDPOINT + a running S3 endpoint; `cargo test -- --ignored`"]
 async fn runner_executes_full_suite_against_s3() {
     let (adapter, _guard, signs_urls) = s3_setup().await;
     run_conformance_suite(adapter, signs_urls).await;

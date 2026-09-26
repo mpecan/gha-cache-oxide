@@ -46,13 +46,12 @@ updates:
   # distroless runtime (`gcr.io/distroless/static-debian12:nonroot`).
   #
   # NOT covered by this ecosystem:
-  # - `services:` block images in `ci.yml` (`postgres:16-alpine`,
-  #   `minio/minio:RELEASE.*`) — Dependabot's docker scanner only reads
-  #   Dockerfiles and docker-compose, not workflow `services:`.
-  # - MinIO is also unfixable here regardless: its `RELEASE.YYYY-MM-...`
-  #   tag scheme is non-semver, so Dependabot can't compare versions.
-  #   Bump policy: manual review against MinIO release notes (documented
-  #   inline at the MinIO image tag in `.github/workflows/ci.yml`).
+  # - Images referenced from `ci.yml` (`services:` blocks such as
+  #   `postgres:16-alpine`, and `env:` refs such as `GARAGE_IMAGE`) —
+  #   Dependabot's docker scanner only reads Dockerfiles and
+  #   docker-compose, not workflows. Bump policy: manual review against
+  #   release notes (documented inline at each image in
+  #   `.github/workflows/ci.yml`).
   - package-ecosystem: docker
     directory: /
     schedule:
