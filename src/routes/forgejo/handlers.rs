@@ -19,6 +19,7 @@ use crate::cache::chunked::{ChunkedCommitError, chunk_object_name, complete_chun
 use crate::cache::{MAX_STORAGE_PROBES, probe_storage_for_entry, purge_broken_entry};
 use crate::db::entities::{CacheEntry, CacheEntryCoord, MatchRequest, NewUpload, Upload};
 use crate::db::id::{new_upload_id, new_uuid, now_ms};
+use crate::merge;
 use crate::metrics::Metrics;
 use crate::routes::blob;
 use crate::state::AppState;
@@ -315,14 +316,15 @@ pub(super) async fn commit(
     )
     .await;
     match result {
-        Ok(size) => {
+        Ok(committed) => {
             f.commits.inc();
             tracing::info!(
                 upload_id = upload.id,
                 key = upload.key,
-                size,
+                size = committed.size,
                 "forgejo cache committed"
             );
+            spawn_merge_after_commit(&state, committed.location_id);
             json_empty()
         }
         Err(ChunkedCommitError::UploadGone) => not_reserved(upload.id),
@@ -339,6 +341,31 @@ pub(super) async fn commit(
             internal(&e)
         }
     }
+}
+
+/// Merges the new entry's chunks-turned-parts in the background, so the
+/// first restore is one read of the `merged` blob rather than a merge
+/// done inline at the client's pace (measured ~5× slower on Garage).
+/// Tracked by `MergeTracker`, so graceful shutdown waits for it. Purely
+/// an optimisation: failures only mean the first download merges lazily.
+fn spawn_merge_after_commit(state: &AppState, location_id: String) {
+    let db = state.db.clone();
+    let storage = state.storage.clone();
+    let tracker = state.merges.clone();
+    state.merges.spawn(async move {
+        let location = match db.find_storage_location_by_id(&location_id).await {
+            Ok(Some(l)) => l,
+            // Superseded or reaped between commit and here: nothing to do.
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, location_id, "post-commit merge: lookup failed");
+                return;
+            }
+        };
+        if let Err(e) = merge::start_background_merge(db, storage, &tracker, location).await {
+            tracing::warn!(error = %e, location_id, "post-commit merge: could not start");
+        }
+    });
 }
 
 /// act's `readCache` + write-isolation check for `caches/:id`.

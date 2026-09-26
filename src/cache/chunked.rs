@@ -125,9 +125,18 @@ fn parse_chunk_name(name: &str) -> Option<u64> {
     u64::from_str_radix(name, 16).ok()
 }
 
+/// A committed chunked upload.
+#[derive(Debug)]
+pub struct CommittedUpload {
+    /// Size in bytes of the committed archive.
+    pub size: u64,
+    /// `storage_locations.id` the entry now points at (for a follow-up
+    /// background merge).
+    pub location_id: String,
+}
+
 /// Validates the uploaded chunks of `upload`, rewrites them into the
 /// `parts/<i>` layout, and commits the upload as a cache entry.
-/// Returns the committed size in bytes.
 ///
 /// `expected_size` is the size the client declared on commit; `None`
 /// skips the size check (act does the same for old clients that don't
@@ -143,7 +152,7 @@ pub async fn complete_chunked_upload(
     upload: &Upload,
     expected_size: Option<u64>,
     now_ms: i64,
-) -> Result<u64, ChunkedCommitError> {
+) -> Result<CommittedUpload, ChunkedCommitError> {
     // Refresh `lastPartUploadedAt` so `cleanup:uploads` leaves the
     // upload alone while the (possibly slow, on S3) copies run.
     if !db.touch_upload(upload.id, now_ms).await? {
@@ -175,7 +184,11 @@ pub async fn complete_chunked_upload(
         repo_id: &upload.repo_id,
     };
     let outcome = commit_upload_tx(db, upload, coord, part_count, now_ms).await?;
-    let CommitTxOutcome::Committed(previous) = outcome else {
+    let CommitTxOutcome::Committed {
+        location_id,
+        previous,
+    } = outcome
+    else {
         // A concurrent commit won. The parts/* we just copied are
         // byte-identical overwrites of what it committed, so there is
         // nothing to undo — and the folder must not be touched.
@@ -189,7 +202,10 @@ pub async fn complete_chunked_upload(
     if let Err(e) = adapter.delete_folder(&chunks_folder).await {
         tracing::warn!(error = %e, folder = chunks_folder, "failed to delete committed chunks");
     }
-    Ok(total)
+    Ok(CommittedUpload {
+        size: total,
+        location_id,
+    })
 }
 
 async fn copy_chunks_to_parts(

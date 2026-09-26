@@ -63,14 +63,15 @@ impl AppState {
         config: AppConfig,
         http_client: reqwest::Client,
     ) -> Self {
+        let metrics = Arc::new(Metrics::default());
         Self {
             db,
             storage,
             jwks,
             config: Arc::new(config),
             http_client,
-            merges: MergeTracker::new(),
-            metrics: Arc::new(Metrics::default()),
+            merges: MergeTracker::with_metrics(metrics.clone()),
+            metrics,
         }
     }
 }

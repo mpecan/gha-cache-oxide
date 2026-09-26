@@ -424,3 +424,56 @@ async fn exact_hit_returns_the_requested_key_case() {
     let (_, body) = r.find("node-cache-Linux-x64-pnpm-", VERSION).await;
     assert_eq!(body.unwrap()["cacheKey"], key.to_lowercase());
 }
+
+/// Commit starts a background merge, so the entry is merged before
+/// anyone downloads it (first restore = one read of `merged`).
+#[tokio::test]
+async fn commit_merges_in_the_background_before_first_download() {
+    let (srv, r) = setup().await;
+    let content = random_bytes(3 * 1000 + 5);
+    let id = r.reserve("bg_merge", VERSION, content.len()).await;
+    for (i, part) in content.chunks(1000).enumerate() {
+        let start = i * 1000;
+        let range = format!("bytes {start}-{}/*", start + part.len() - 1);
+        assert_eq!(r.patch(id, &range, part.to_vec()).await, StatusCode::OK);
+    }
+    assert_eq!(r.commit(id, Some(content.len())).await, StatusCode::OK);
+
+    // No download yet: poll the location until the merge lands.
+    let (_, body) = r.find("bg_merge", VERSION).await;
+    let location = body.unwrap()["archiveLocation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let entry_id = location.rsplit('/').next().unwrap().to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let merged = loop {
+        let loc = srv
+            .db
+            .find_location_for_entry(&entry_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if loc.parts_deleted_at.is_some() {
+            break loc;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background merge never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert!(merged.merged_at.is_some());
+    assert_eq!(srv.metrics.merges.completed.get(), 1);
+
+    let (_, bytes) = r.download(&location).await;
+    assert!(bytes.as_ref() == content.as_slice(), "merged blob differs");
+    let text = reqwest::get(format!("{}/metrics", srv.base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(text.contains("gha_cache_oxide_merges_total{result=\"ok\"} 1\n"));
+    assert!(text.contains("gha_cache_oxide_merge_duration_seconds_count 1\n"));
+}

@@ -94,7 +94,7 @@ pub(crate) async fn complete_upload(
         params.now_ms,
     )
     .await?;
-    let CommitTxOutcome::Committed(previous) = outcome else {
+    let CommitTxOutcome::Committed { previous, .. } = outcome else {
         return Err(CompleteUploadError::UploadNotFound);
     };
     delete_superseded_folder(adapter, previous, &upload.folder_name).await;
@@ -160,9 +160,12 @@ async fn validate_disk_parts(
 
 /// Outcome of [`commit_upload_tx`].
 enum CommitTxOutcome {
-    /// Committed; carries the superseded location (if any) so the caller
-    /// can delete its blob folder.
-    Committed(Option<crate::db::entities::PreviousLocation>),
+    /// Committed. Carries the new location's id and the superseded
+    /// location (if any) so the caller can delete its blob folder.
+    Committed {
+        location_id: String,
+        previous: Option<crate::db::entities::PreviousLocation>,
+    },
     /// The `uploads` row was already gone — a concurrent commit (a
     /// client retry) or `cleanup:uploads` consumed it first. Nothing was
     /// written.
@@ -202,7 +205,10 @@ async fn commit_upload_tx(
     }
 
     tx.commit().await?;
-    Ok(CommitTxOutcome::Committed(previous))
+    Ok(CommitTxOutcome::Committed {
+        location_id: new_location_id,
+        previous,
+    })
 }
 
 /// Caps the storage-probe loop at three attempts per request. Mirrors

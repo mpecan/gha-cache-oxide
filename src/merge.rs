@@ -48,6 +48,7 @@ use tokio_util::task::TaskTracker;
 use crate::db::Db;
 use crate::db::entities::StorageLocation;
 use crate::db::id::now_ms;
+use crate::metrics::Metrics;
 use crate::storage::{ByteStream, StorageAdapter, StorageError};
 
 /// Bounded mpsc capacity for the tee channels. Each chunk is a `Bytes`
@@ -67,12 +68,24 @@ const CHAN_CAP: usize = 16;
 #[derive(Clone, Default)]
 pub struct MergeTracker {
     inner: TaskTracker,
+    /// Where merge outcomes and durations are recorded; shared with
+    /// `AppState::metrics` in the server, private in tests.
+    metrics: Arc<Metrics>,
 }
 
 impl MergeTracker {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A tracker that records into `metrics` (the server's `/metrics`).
+    #[must_use]
+    pub fn with_metrics(metrics: Arc<Metrics>) -> Self {
+        Self {
+            inner: TaskTracker::new(),
+            metrics,
+        }
     }
 
     /// Spawns `future` onto the tokio runtime and records it for
@@ -171,6 +184,8 @@ pub(crate) async fn start_lazy_merge(
         location_id,
         folder_name,
         merged_name,
+        metrics: tracker.metrics.clone(),
+        started: std::time::Instant::now(),
     };
     tracker.spawn(async move { run_merger(merger_ctx, merge_rx).await });
 
@@ -186,6 +201,34 @@ pub(crate) async fn start_lazy_merge(
     Ok(LazyMergeOutcome::Claimed(
         ReceiverStream::new(resp_rx).boxed(),
     ))
+}
+
+/// Merges `location` in the background with no client attached —
+/// used right after a commit so the first download is already a single
+/// read of the `merged` blob instead of paying for the merge inline.
+///
+/// It is the lazy merge with the response side dropped: the pump
+/// already tolerates a vanished reader and keeps feeding the merger.
+/// Correctness never depends on it finishing — a download that arrives
+/// mid-merge takes the existing wait-for-merge path, and one that
+/// arrives after a failed merge (flags reset) lazy-merges itself.
+/// Returns `false` when another merge already holds the claim.
+///
+/// # Errors
+/// Same as [`start_lazy_merge`].
+pub(crate) async fn start_background_merge(
+    db: Arc<dyn Db>,
+    storage: Arc<dyn StorageAdapter>,
+    tracker: &MergeTracker,
+    location: StorageLocation,
+) -> Result<bool, StorageError> {
+    match start_lazy_merge(db, storage, tracker, location).await? {
+        LazyMergeOutcome::Claimed(response) => {
+            drop(response);
+            Ok(true)
+        }
+        LazyMergeOutcome::LostRace => Ok(false),
+    }
 }
 
 /// Streams parts 0..`part_count` concurrently into the response and
@@ -245,6 +288,9 @@ struct MergerCtx {
     /// Pre-formatted `<folder_name>/merged` so the merger doesn't
     /// redo the format.
     merged_name: String,
+    metrics: Arc<Metrics>,
+    /// When the merge was claimed; feeds the duration histogram.
+    started: std::time::Instant,
 }
 
 /// Runs the background merger: uploads the teed byte stream as
@@ -255,15 +301,33 @@ struct MergerCtx {
 async fn run_merger(ctx: MergerCtx, merge_rx: mpsc::Receiver<Result<Bytes, io::Error>>) {
     let stream: ByteStream = ReceiverStream::new(merge_rx).boxed();
     match ctx.storage.upload_stream(&ctx.merged_name, stream).await {
+        Ok(()) if location_vanished(&ctx).await => {
+            // Superseded (re-committed key) or reaped while we merged:
+            // no row points at this folder any more, and its owner's
+            // folder delete may have run before our `merged` landed.
+            // Remove what we wrote instead of leaking it.
+            tracing::info!(
+                location_id = %ctx.location_id,
+                "merge finished after its location was deleted; dropping the blob",
+            );
+            if let Err(e) = ctx.storage.delete_folder(&ctx.folder_name).await {
+                tracing::warn!(error = %e, folder = %ctx.folder_name, "failed to drop orphaned merge");
+            }
+        }
         Ok(()) => {
-            if let Err(e) = finalize_merge(
+            let finalized = finalize_merge(
                 ctx.db.as_ref(),
                 ctx.storage.as_ref(),
                 &ctx.location_id,
                 &ctx.folder_name,
             )
-            .await
-            {
+            .await;
+            if finalized.is_ok() {
+                ctx.metrics.merges.completed.inc();
+                ctx.metrics.merges.duration.observe(ctx.started.elapsed());
+            }
+            if let Err(e) = finalized {
+                ctx.metrics.merges.failed.inc();
                 tracing::error!(
                     error = %e,
                     location_id = %ctx.location_id,
@@ -272,6 +336,7 @@ async fn run_merger(ctx: MergerCtx, merge_rx: mpsc::Receiver<Result<Bytes, io::E
             }
         }
         Err(e) => {
+            ctx.metrics.merges.failed.inc();
             tracing::warn!(
                 error = %e,
                 location_id = %ctx.location_id,
@@ -286,6 +351,13 @@ async fn run_merger(ctx: MergerCtx, merge_rx: mpsc::Receiver<Result<Bytes, io::E
             }
         }
     }
+}
+
+/// `true` only when the location row is provably gone. A DB error
+/// counts as "still there" so the normal finalise path (and its error
+/// handling) runs.
+async fn location_vanished(ctx: &MergerCtx) -> bool {
+    matches!(ctx.db.get_merge_state(&ctx.location_id).await, Ok(None))
 }
 
 /// Marks the merge as complete in the DB, then in a single tx marks
@@ -420,3 +492,7 @@ pub(crate) async fn wait_for_merge_then_serve(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod background_tests;
