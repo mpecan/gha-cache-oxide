@@ -284,7 +284,8 @@ impl Runner {
         assert_eq!(status, StatusCode::OK);
         let body = body.unwrap();
         assert_eq!(body["result"], "hit");
-        assert_eq!(body["cacheKey"], key.to_lowercase());
+        // Exact hit: the key comes back as the client spelled it.
+        assert_eq!(body["cacheKey"], key);
         let (status, got) = self
             .download(body["archiveLocation"].as_str().unwrap())
             .await;

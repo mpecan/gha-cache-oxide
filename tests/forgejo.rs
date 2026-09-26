@@ -266,7 +266,10 @@ async fn case_insensitive() {
     assert_eq!(status, StatusCode::OK);
     let body = body.unwrap();
     assert_eq!(body["result"], "hit");
-    assert_eq!(body["cacheKey"], "case_insensitive_abc");
+    // Deviation: act returns the stored, lowercased key here. Oxide
+    // matches case-insensitively too but echoes the requested key on an
+    // exact hit, so case-sensitive clients (setup-node) see a hit.
+    assert_eq!(body["cacheKey"], "case_insensitive_aBc");
 }
 
 async fn exact_keys_are_preferred(first_request_key: Option<&str>) {

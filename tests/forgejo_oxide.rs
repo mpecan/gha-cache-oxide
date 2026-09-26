@@ -175,8 +175,41 @@ async fn empty_keys_do_not_match_everything() {
 async fn find_purges_entry_whose_blob_vanished() {
     let (srv, r) = setup().await;
     r.upload_normally("vanished", VERSION, &[1; 10]).await;
+    // The download in `upload_normally` started a background lazy merge;
+    // let it land first, or it can write `merged` after the clear below.
+    let (_, body) = r.find("vanished", VERSION).await;
+    let location = body.unwrap()["archiveLocation"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let entry_id = location.rsplit('/').next().unwrap().to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let loc = srv
+            .db
+            .find_location_for_entry(&entry_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if loc.parts_deleted_at.is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lazy merge never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
     srv.storage.clear().await.unwrap();
     assert_eq!(r.find("vanished", VERSION).await.0, StatusCode::NO_CONTENT);
+    assert!(
+        srv.db
+            .find_cache_entry_by_id(&entry_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -367,4 +400,27 @@ async fn metrics_are_not_mounted_without_the_dialect() {
     let srv = spawn(None).await;
     let resp = reqwest::get(format!("{}/metrics", srv.base)).await.unwrap();
     assert_ne!(resp.status(), StatusCode::OK);
+}
+
+/// Regression (trial, setup-node `cache: pnpm`): the restored key must
+/// equal the primary key byte-for-byte, or `actions/setup-node`
+/// (`primaryKey === matchedKey`) re-uploads the whole cache on a hit.
+#[tokio::test]
+async fn exact_hit_returns_the_requested_key_case() {
+    let (_srv, r) = setup().await;
+    let key = "node-cache-Linux-x64-pnpm-AbC123";
+    r.upload_normally(key, VERSION, &[1; 10]).await;
+
+    let (_, body) = r.find(key, VERSION).await;
+    assert_eq!(body.unwrap()["cacheKey"], key);
+
+    // A restore key that matches exactly is echoed too.
+    let (_, body) = r
+        .find(&format!("node-cache-Linux-x64-pnpm-nomatch,{key}"), VERSION)
+        .await;
+    assert_eq!(body.unwrap()["cacheKey"], key);
+
+    // A prefix hit has no requested spelling to echo: stored key.
+    let (_, body) = r.find("node-cache-Linux-x64-pnpm-", VERSION).await;
+    assert_eq!(body.unwrap()["cacheKey"], key.to_lowercase());
 }

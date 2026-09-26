@@ -62,6 +62,12 @@
 //!   support (act uses `http.ServeFile`). `@actions/cache` v1 only uses
 //!   Range against Azure hosts, so restores are unaffected, but its
 //!   client-side truncation check is skipped.
+//! - `cacheKey` on an exact hit is the requested key as the client
+//!   spelled it; act returns the stored, lowercased key, which makes
+//!   case-sensitive clients (`actions/setup-node`: `primaryKey ===
+//!   matchedKey`) treat every hit as a miss and re-upload the cache.
+//!   Matching itself stays case-insensitive, as in act. A prefix hit
+//!   returns the stored (lowercased) key.
 //! - Empty keys in `?keys=` are ignored. act would turn one into a
 //!   match-anything prefix.
 //! - GC follows oxide's own cleanup tasks, not act's 7d/30d policy.
