@@ -62,6 +62,7 @@ impl AppConfig {
             enable_direct_downloads: false,
             skip_token_validation: true,
             management_api_key: None,
+            forgejo_cache_secret: None,
             default_actions_results_url: "https://results-receiver.test/"
                 .parse()
                 .expect("hardcoded valid URL literal"),

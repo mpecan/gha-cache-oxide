@@ -12,6 +12,7 @@ use crate::auth::JwksCache;
 use crate::config::AppConfig;
 use crate::db::Db;
 use crate::merge::MergeTracker;
+use crate::metrics::Metrics;
 use crate::storage::StorageAdapter;
 
 /// Application state. Cloned cheaply — every field is itself `Arc`-ish.
@@ -30,6 +31,8 @@ pub struct AppState {
     /// await them. Shared via `Clone` (internal `Arc`). `pub` because
     /// `main.rs` clones it out to drain after `axum::serve` returns.
     pub merges: MergeTracker,
+    /// Prometheus counters served at `/metrics`.
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -67,6 +70,7 @@ impl AppState {
             config: Arc::new(config),
             http_client,
             merges: MergeTracker::new(),
+            metrics: Arc::new(Metrics::default()),
         }
     }
 }

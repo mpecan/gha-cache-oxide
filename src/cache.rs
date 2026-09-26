@@ -10,6 +10,8 @@
 //!   storage-health probe and FK-cascade purge primitives used by the
 //!   download path's purge-and-retry loop (#72).
 
+pub(crate) mod chunked;
+
 use crate::db::Db;
 use crate::db::entities::{CacheEntry, CacheEntryCoord, Upload};
 use crate::db::id::new_uuid;
@@ -84,8 +86,22 @@ pub(crate) async fn complete_upload(
     validate_upload_counts(db, &upload).await?;
     validate_disk_parts(db, adapter, &upload).await?;
 
-    let previous = commit_upload_tx(db, &upload, &params).await?;
+    let previous = commit_upload_tx(
+        db,
+        &upload,
+        params.coord,
+        upload.finished_part_upload_count,
+        params.now_ms,
+    )
+    .await?;
+    delete_superseded_folder(adapter, previous).await;
+    Ok(upload)
+}
 
+async fn delete_superseded_folder(
+    adapter: &dyn StorageAdapter,
+    previous: Option<crate::db::entities::PreviousLocation>,
+) {
     // Post-commit cleanup of the superseded blob folder. Failure here
     // does not un-do the commit — the row is already repointed — so we
     // log and continue. Upstream does the same (fire-and-forget
@@ -99,8 +115,6 @@ pub(crate) async fn complete_upload(
             "failed to delete superseded upload folder; storage row already removed",
         );
     }
-
-    Ok(upload)
 }
 
 async fn validate_upload_counts(db: &dyn Db, upload: &Upload) -> Result<(), CompleteUploadError> {
@@ -141,19 +155,17 @@ async fn validate_disk_parts(
 async fn commit_upload_tx(
     db: &dyn Db,
     upload: &Upload,
-    params: &CompleteUploadParams<'_>,
-) -> Result<Option<crate::db::entities::PreviousLocation>, CompleteUploadError> {
+    coord: CacheEntryCoord<'_>,
+    part_count: i64,
+    now_ms: i64,
+) -> Result<Option<crate::db::entities::PreviousLocation>, sqlx::Error> {
     let mut tx = db.begin().await?;
     let new_location_id = new_uuid();
-    tx.insert_storage_location(
-        &new_location_id,
-        &upload.folder_name,
-        upload.finished_part_upload_count,
-    )
-    .await?;
+    tx.insert_storage_location(&new_location_id, &upload.folder_name, part_count)
+        .await?;
 
     let previous = tx
-        .upsert_cache_entry(params.coord, &new_location_id, params.now_ms)
+        .upsert_cache_entry(coord, &new_location_id, now_ms)
         .await?;
 
     if let Some(prev) = &previous {

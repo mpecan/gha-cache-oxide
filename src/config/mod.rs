@@ -69,6 +69,13 @@ pub struct AppConfig {
     /// (full upstream parity); the parser normalises `0` to
     /// [`usize::MAX`].
     pub proxy_max_request_body_bytes: usize,
+    /// Shared HMAC secret for the Forgejo runner cache dialect
+    /// (`FORGEJO_CACHE_SECRET`, must equal the runner's `cache.secret`).
+    /// When set, the v1 `/_apis/artifactcache/*` surface that the
+    /// Forgejo runner's cache proxy speaks is mounted; unset leaves it
+    /// off entirely. Not an upstream knob — upstream dropped v1 in
+    /// v9.0.0 — see `src/routes/forgejo/mod.rs`.
+    pub forgejo_cache_secret: Option<Secret>,
     pub storage: StorageConfig,
     pub database: DbConfig,
 }
@@ -110,6 +117,7 @@ impl AppConfig {
                 "https://results-receiver.actions.githubusercontent.com",
             )?,
             proxy_max_request_body_bytes: parse_proxy_max_body()?,
+            forgejo_cache_secret: env::optional_secret("FORGEJO_CACHE_SECRET"),
             storage: StorageConfig::from_env()?,
             database: DbConfig::from_env()?,
         })
