@@ -105,6 +105,51 @@ upstream only in the following deliberate, tested ways:
   "merged file deleted while parts/* still exist" is intentionally not
   caught by this coarse probe; that's the lazy-merge path's territory.
 
+## Forgejo runner cache (v1 `_apis/artifactcache`)
+
+Forgejo runners send cache traffic to an external server only through
+their built-in cache proxy, which speaks the GitHub cache API **v1**
+(`/_apis/artifactcache/*`); the v2 twirp path points at Forgejo itself.
+Upstream dropped v1 in v9.0.0. Oxide serves it as an opt-in second
+dialect so one oxide deployment can back a fleet of Forgejo runners.
+The v2 surface is unaffected.
+
+Enable it by setting the secret shared with the runners:
+
+| Var | Notes |
+|---|---|
+| `FORGEJO_CACHE_SECRET` | Must equal the runner's `cache.secret`. Unset → the v1 routes are not mounted. |
+
+Runner side (`config.yml`):
+
+```yaml
+cache:
+  enabled: true
+  external_server: "http://gha-cache-oxide.ci-cache.svc:3000/"
+  secret: "<same value as FORGEJO_CACHE_SECRET>"
+```
+
+The reference implementation, and the spec, is `forgejo-runner` v13.2.0
+`act/artifactcache` (what `forgejo-runner cache-server` serves). Every
+request is authenticated by the proxy's `Forgejo-Cache-MAC` header
+(HMAC-SHA256 over repo, run number, timestamp and write-isolation key)
+and rejected with 403 if it does not verify or the timestamp is in the
+future. Entries are scoped per repository and per write-isolation key,
+falling back from the run's key to the shared (empty-key) scope on read,
+exactly as act does. Chunks are streamed to object storage as they
+arrive (parallel, any order); commit validates that they tile the
+declared size and rewrites them server-side into oxide's normal parts
+layout. Deliberate deviations from act are listed at the top of
+[`src/routes/forgejo/mod.rs`](./src/routes/forgejo/mod.rs).
+
+Prometheus counters for the dialect are served at `GET /metrics`
+(`gha_cache_oxide_forgejo_{cache_lookups,upload_bytes,download_bytes,upload_errors,commits,commit_errors,auth_failures}_total`).
+
+Tests: `tests/forgejo.rs` ports act's `handler_test.go`; the manual
+end-to-end harness in [`tests/forgejo_e2e/`](./tests/forgejo_e2e) drives
+the real `@actions/cache` client (v4 and v6) through the real runner
+cache proxy against oxide on Garage.
+
 ## Management API
 
 A small REST/JSON surface is exposed under `/management` for operators
