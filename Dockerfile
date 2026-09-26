@@ -9,18 +9,20 @@
 # the binary is `cp`'d to /tmp before the layer ends so it survives
 # the cache mount.
 #
-# Stage 2 — `gcr.io/distroless/static-debian12:nonroot` is ~2 MiB,
+# Stage 2 — `gcr.io/distroless/static-debian13:nonroot` is ~2 MiB,
 # has no shell, runs as the non-root UID 65532 by default, and matches
 # the issue #20 brief verbatim. No HEALTHCHECK directive: distroless
 # has no curl/wget/sh; the README's `curl /health` step is the
 # acceptance-criteria probe instead.
 
-# Pinned to match `rust-toolchain.toml` (1.93.0) and a published Alpine
-# tag. The exact `rust:1.93.0-alpine3.20` tag is on Docker Hub.
-ARG RUST_VERSION=1.93.0
-ARG ALPINE_VERSION=3.20
-
-FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
+# Both base images are pinned as literal `tag@digest` (multi-arch index
+# digests, so amd64 and arm64 builds resolve the same release). The tag
+# documents intent; the digest is what is pulled. Keep them literal —
+# no ARG interpolation — so Dependabot can bump tag and digest together
+# and a tag edit can never silently build against a stale digest.
+#
+# Builder tag matches `rust-toolchain.toml` (1.93.0).
+FROM rust:1.93.0-alpine3.20@sha256:66e45ca090b7d2424b1ab4366d308ebff31906a36309bd097dacdc2e531cd9c3 AS builder
 
 # musl-dev is the toolchain — the `rust:alpine` image already targets
 # x86_64-unknown-linux-musl, but the C runtime headers aren't on the
@@ -61,7 +63,7 @@ RUN mkdir -p /seed/gha-cache
 
 # ----------------------------------------------------------------------
 
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS runtime
 
 COPY --from=builder /tmp/gha-cache-oxide /usr/local/bin/gha-cache-oxide
 # `nonroot` resolves to UID 65532 via the distroless image's

@@ -32,7 +32,7 @@ Stop with `docker compose down` — data persists across restarts. To wipe
 the cache state, `docker compose down -v` (removes the named volume).
 
 The image is built from a `rust:alpine` (musl) builder onto
-`gcr.io/distroless/static-debian12:nonroot`, so it ships as a fully-static
+`gcr.io/distroless/static-debian13:nonroot` (both digest-pinned), so it ships as a fully-static
 binary on a ~2 MiB base. No shell, no package manager, runs as the
 non-root UID 65532.
 

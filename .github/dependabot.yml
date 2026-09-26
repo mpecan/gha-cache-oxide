@@ -41,9 +41,10 @@ updates:
           - minor
           - patch
 
-  # Dockerfile base images: `rust:${RUST_VERSION}-alpine${ALPINE_VERSION}`
-  # (Dependabot reads the `ARG` defaults — 1.93.0 + 3.20) plus the
-  # distroless runtime (`gcr.io/distroless/static-debian12:nonroot`).
+  # Dockerfile base images, pinned as literal `tag@digest`:
+  # `rust:1.93.0-alpine3.20@sha256:…` and the distroless runtime
+  # (`gcr.io/distroless/static-debian13:nonroot@sha256:…`). Dependabot
+  # bumps the digest (and tag) of each `FROM` line.
   #
   # NOT covered by this ecosystem:
   # - Images referenced from `ci.yml` (`services:` blocks such as
