@@ -22,7 +22,7 @@
 # and a tag edit can never silently build against a stale digest.
 #
 # Builder tag matches `rust-toolchain.toml` (1.93.0).
-FROM rust:1.93.0-alpine3.20@sha256:66e45ca090b7d2424b1ab4366d308ebff31906a36309bd097dacdc2e531cd9c3 AS builder
+FROM rust:1.94.1-alpine3.20@sha256:6b1a8a05a7d4863f87c383ceb645bf038c5dba41e5a43fb7c7cc4a252b313a35 AS builder
 
 # musl-dev is the toolchain — the `rust:alpine` image already targets
 # x86_64-unknown-linux-musl, but the C runtime headers aren't on the
