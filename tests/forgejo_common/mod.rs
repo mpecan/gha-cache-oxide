@@ -15,9 +15,12 @@ use gha_cache_oxide::db::{Db, SqliteDb};
 use gha_cache_oxide::metrics::Metrics;
 use gha_cache_oxide::routes::forgejo::compute_mac;
 use gha_cache_oxide::state::AppState;
-use gha_cache_oxide::storage::{FilesystemAdapter, StorageAdapter};
+use gha_cache_oxide::storage::{
+    ByteStream, FilesystemAdapter, ObjectInfo, StorageAdapter, StorageError,
+};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -58,11 +61,27 @@ impl Drop for Server {
 
 /// Spawns a server. `secret = None` leaves the dialect disabled.
 pub async fn spawn(secret: Option<&str>) -> Server {
+    spawn_inner(secret, false).await.0
+}
+
+/// Dialect enabled, storage wrapped in a [`FlakyStorage`] the test can
+/// switch to failing.
+pub async fn spawn_flaky() -> (Server, Arc<FlakyStorage>) {
+    let (srv, flaky) = spawn_inner(Some(SECRET), true).await;
+    (srv, flaky.unwrap())
+}
+
+async fn spawn_inner(secret: Option<&str>, flaky: bool) -> (Server, Option<Arc<FlakyStorage>>) {
     let tmp = TempDir::new().unwrap();
+    let fs: Arc<dyn StorageAdapter> = Arc::new(FilesystemAdapter::new(tmp.path()).unwrap());
+    let flaky = flaky.then(|| FlakyStorage::new(fs.clone()));
+    let storage: Arc<dyn StorageAdapter> = match &flaky {
+        Some(f) => f.clone(),
+        None => fs,
+    };
     let db = SqliteDb::connect_in_memory().await.unwrap();
     db.migrate().await.unwrap();
     let db: Arc<dyn Db> = Arc::new(db);
-    let storage: Arc<dyn StorageAdapter> = Arc::new(FilesystemAdapter::new(tmp.path()).unwrap());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -96,14 +115,15 @@ pub async fn spawn(secret: Option<&str>) -> Server {
             .await
     });
 
-    Server {
+    let srv = Server {
         base,
         db,
         storage,
         metrics,
         tmp,
         shutdown: Some(tx),
-    }
+    };
+    (srv, flaky)
 }
 
 /// Signs requests like `act/cacheproxy`'s `Rewrite` hook.
@@ -293,4 +313,60 @@ pub fn random_bytes(n: usize) -> Vec<u8> {
 /// "newest first" ordering deterministic between uploads.
 pub async fn tick() {
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+}
+
+/// Filesystem adapter whose `upload_stream` / `copy` can be switched to
+/// fail, to exercise storage-error paths.
+pub struct FlakyStorage {
+    inner: Arc<dyn StorageAdapter>,
+    pub fail_upload: AtomicBool,
+    pub fail_copy: AtomicBool,
+}
+
+impl FlakyStorage {
+    pub fn new(inner: Arc<dyn StorageAdapter>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            fail_upload: AtomicBool::new(false),
+            fail_copy: AtomicBool::new(false),
+        })
+    }
+}
+
+fn injected() -> StorageError {
+    StorageError::Io(std::io::Error::other("injected failure"))
+}
+
+#[async_trait::async_trait]
+impl StorageAdapter for FlakyStorage {
+    async fn upload_stream(&self, name: &str, body: ByteStream) -> Result<(), StorageError> {
+        if self.fail_upload.load(Ordering::SeqCst) {
+            return Err(injected());
+        }
+        self.inner.upload_stream(name, body).await
+    }
+    async fn download_stream(&self, name: &str) -> Result<ByteStream, StorageError> {
+        self.inner.download_stream(name).await
+    }
+    async fn delete_folder(&self, folder: &str) -> Result<(), StorageError> {
+        self.inner.delete_folder(folder).await
+    }
+    async fn count_files_in_folder(&self, folder: &str) -> Result<u64, StorageError> {
+        self.inner.count_files_in_folder(folder).await
+    }
+    async fn list_folder(&self, folder: &str) -> Result<Vec<ObjectInfo>, StorageError> {
+        self.inner.list_folder(folder).await
+    }
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        if self.fail_copy.load(Ordering::SeqCst) {
+            return Err(injected());
+        }
+        self.inner.copy(from, to).await
+    }
+    async fn signed_url(&self, name: &str) -> Result<Option<url::Url>, StorageError> {
+        self.inner.signed_url(name).await
+    }
+    async fn clear(&self) -> Result<(), StorageError> {
+        self.inner.clear().await
+    }
 }

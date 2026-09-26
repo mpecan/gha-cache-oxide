@@ -18,7 +18,7 @@
 
 use futures::{StreamExt, TryStreamExt};
 
-use super::{commit_upload_tx, delete_superseded_folder};
+use super::{CommitTxOutcome, commit_upload_tx, delete_superseded_folder};
 use crate::db::Db;
 use crate::db::entities::{CacheEntryCoord, Upload};
 use crate::storage::{ObjectInfo, StorageAdapter, StorageError};
@@ -41,6 +41,14 @@ pub fn chunk_object_name(folder: &str, start: u64) -> String {
 /// are client-caused and leave the upload (row + blobs) deleted.
 #[derive(Debug, thiserror::Error)]
 pub enum ChunkedCommitError {
+    /// The upload was consumed concurrently (another commit of the same
+    /// id — typically a client retry — or `cleanup:uploads`).
+    #[error("upload no longer exists")]
+    UploadGone,
+
+    #[error("{0} chunks exceed the partCount column")]
+    TooManyChunks(usize),
+
     #[error("no chunks have been uploaded")]
     NoChunks,
 
@@ -67,6 +75,7 @@ impl ChunkedCommitError {
         matches!(
             self,
             Self::NoChunks
+                | Self::TooManyChunks(_)
                 | Self::BadChunkName(_)
                 | Self::Discontiguous { .. }
                 | Self::SizeMismatch { .. }
@@ -137,12 +146,14 @@ pub async fn complete_chunked_upload(
 ) -> Result<u64, ChunkedCommitError> {
     let chunks_folder = format!("{}/chunks", upload.folder_name);
     let chunks = adapter.list_folder(&chunks_folder).await?;
-    let total = match validate_chunk_layout(&chunks, expected_size) {
-        Ok(total) => total,
-        Err(e) => {
-            discard_upload(db, adapter, upload).await?;
-            return Err(e);
-        }
+    let layout = validate_chunk_layout(&chunks, expected_size).and_then(|total| {
+        let n = i64::try_from(chunks.len())
+            .map_err(|_| ChunkedCommitError::TooManyChunks(chunks.len()))?;
+        Ok((total, n))
+    });
+    let (total, part_count) = match layout {
+        Ok(v) => v,
+        Err(e) => return Err(discard_upload(db, adapter, upload, e).await),
     };
 
     copy_chunks_to_parts(adapter, &upload.folder_name, &chunks).await?;
@@ -153,9 +164,14 @@ pub async fn complete_chunked_upload(
         scope: &upload.scope,
         repo_id: &upload.repo_id,
     };
-    let part_count = i64::try_from(chunks.len()).unwrap_or(i64::MAX);
-    let previous = commit_upload_tx(db, upload, coord, part_count, now_ms).await?;
-    delete_superseded_folder(adapter, previous).await;
+    let outcome = commit_upload_tx(db, upload, coord, part_count, now_ms).await?;
+    let CommitTxOutcome::Committed(previous) = outcome else {
+        // A concurrent commit won. The parts/* we just copied are
+        // byte-identical overwrites of what it committed, so there is
+        // nothing to undo — and the folder must not be touched.
+        return Err(ChunkedCommitError::UploadGone);
+    };
+    delete_superseded_folder(adapter, previous, &upload.folder_name).await;
 
     // The chunk objects are now duplicates of parts/*. Leaving them is
     // harmless (the whole folder goes when the location is reaped), so
@@ -190,20 +206,29 @@ async fn copy_chunks_to_parts(
         .await
 }
 
+/// Rejects the upload: deletes its row and, only if that delete is what
+/// removed the row, its folder. When the row was already gone a
+/// concurrent commit owns the folder (it may be a live entry now), so
+/// the caller gets [`ChunkedCommitError::UploadGone`] instead of `err`.
 async fn discard_upload(
     db: &dyn Db,
     adapter: &dyn StorageAdapter,
     upload: &Upload,
-) -> Result<(), sqlx::Error> {
-    db.delete_upload(upload.id).await?;
+    err: ChunkedCommitError,
+) -> ChunkedCommitError {
+    match db.delete_upload(upload.id).await {
+        Ok(true) => {}
+        Ok(false) => return ChunkedCommitError::UploadGone,
+        Err(e) => return e.into(),
+    }
     if let Err(e) = adapter.delete_folder(&upload.folder_name).await {
         tracing::warn!(
             error = %e,
             folder = upload.folder_name,
-            "failed to delete rejected chunked upload; cleanup:uploads will not retry it",
+            "failed to delete rejected chunked upload; its blobs are orphaned",
         );
     }
-    Ok(())
+    err
 }
 
 #[cfg(test)]

@@ -90,13 +90,17 @@ pub fn build_app(state: AppState) -> Router {
         .then(|| routes::forgejo::router(state.clone()));
     let mut app = Router::new()
         .route("/health", get(routes::health::handler))
-        .route("/metrics", get(metrics::handler))
         .nest("/twirp/github.actions.results.api.v1.CacheService", twirp)
         .nest("/management", management)
         .nest("/management-api/_rpc", management_rpc)
         .merge(blob);
     if let Some(forgejo) = forgejo {
-        app = app.nest(routes::forgejo::BASE_PATH, forgejo);
+        // `/metrics` only exports Forgejo counters today, so it is
+        // mounted with the dialect. Unauthenticated, like most scrape
+        // endpoints: expose the port to the cluster, not the internet.
+        app = app
+            .nest(routes::forgejo::BASE_PATH, forgejo)
+            .route("/metrics", get(metrics::handler));
     }
     app
         // Catch-all proxy to `DEFAULT_ACTIONS_RESULTS_URL` (issue #24,

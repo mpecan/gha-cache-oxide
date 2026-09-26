@@ -29,19 +29,50 @@
 //!
 //! - A repository mismatch on `caches/:id` / `artifacts/:id` returns
 //!   **404**. act's `readCache` surfaces it as a fatal 500 that also
-//!   terminates the runner daemon.
+//!   terminates the runner daemon; DB errors likewise return 500 here
+//!   without exiting.
 //! - `PATCH` / `POST caches/:id` on an already-committed id returns
 //!   **404** (not act's 400 "already complete"): committing consumes the
-//!   `uploads` row.
-//! - Commit rejects gaps / overlaps between chunks (400) and a size
-//!   mismatch (400, act: 500). act concatenates whatever it has.
+//!   `uploads` row. Of two overlapping commits of one id (a client
+//!   retry), exactly one succeeds; the other gets 404. A chunk still
+//!   streaming when its upload is committed or reaped is discarded and
+//!   answered 404 rather than left as an orphaned object.
+//! - **Commit size.** act checks the assembled size against reserve's
+//!   `cacheSize` (and skips the check when that is 0, as old clients
+//!   such as `actions/cache@v2` send). Oxide checks the `size` in the
+//!   commit body, which every v1 client sends, and skips the check when
+//!   it is absent. A mismatch is 400 (act: 500). Commit also rejects
+//!   gaps / overlaps between chunks (400); act concatenates whatever
+//!   temp files it has.
+//! - A hit whose blob has vanished is purged and the next candidate is
+//!   tried (up to three probes, then the shared scope), like the v2
+//!   download path (#72); act purges and answers 204 at once.
+//! - "Newest first" means most recently *committed* (`updatedAt`); act
+//!   orders by reservation time. Re-committing the same
+//!   key/version/isolation key replaces the entry (and deletes its old
+//!   blobs immediately — a download of the old blob still streaming is
+//!   cut off; act keeps superseded entries for 5 minutes).
 //! - `artifacts/:id` ids are oxide's UUID cache-entry ids. The id is
 //!   opaque to the proxy and to `@actions/cache` (it only follows
 //!   `archiveLocation`); `cacheId` from reserve stays numeric and
-//!   non-zero (the client treats a falsy id as a failed reserve).
+//!   non-zero (the client treats a falsy id as a failed reserve). The
+//!   same UUID also works on the unauthenticated v2 `/download/{id}`
+//!   route — ids are capabilities there, as in upstream.
+//! - Downloads stream without `Content-Length` and without `Range`
+//!   support (act uses `http.ServeFile`). `@actions/cache` v1 only uses
+//!   Range against Azure hosts, so restores are unaffected, but its
+//!   client-side truncation check is skipped.
 //! - Empty keys in `?keys=` are ignored. act would turn one into a
 //!   match-anything prefix.
 //! - GC follows oxide's own cleanup tasks, not act's 7d/30d policy.
+//!   Notably, entries that are never downloaded are never expired
+//!   (upstream parity, see `find_expired_locations`).
+//!
+//! Same as act, worth knowing: the MAC timestamp is minted once per job
+//! on the runner and never expires, so there is no replay window but
+//! also no clock-skew tolerance — oxide's clock must not lag the
+//! runners'. A single chunk above 5 GiB fails on S3 at commit
+//! (`CopyObject` limit); `@actions/cache` sends 32 MiB chunks.
 
 mod auth;
 mod handlers;
@@ -73,6 +104,9 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/artifacts/{id}", get(handlers::get_artifact))
         .route("/clean", post(handlers::clean))
+        // Unknown sub-paths answer here instead of falling through to the
+        // catch-all proxy (which would forward them to GitHub).
+        .fallback(|| async { json_error(StatusCode::NOT_FOUND, "not found") })
         .layer(axum_mw::from_fn_with_state(
             state,
             auth::require_forgejo_mac,

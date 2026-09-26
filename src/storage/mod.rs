@@ -134,7 +134,10 @@ pub(crate) async fn list_under_prefix(
                     size: meta.size,
                 });
             }
-            Err(object_store::Error::NotFound { .. }) => return Ok(Vec::new()),
+            // A missing folder lists as NotFound on some backends; that
+            // is "empty". Mid-listing, it is a real error — returning the
+            // partial list would look like missing chunks.
+            Err(object_store::Error::NotFound { .. }) if out.is_empty() => return Ok(Vec::new()),
             Err(e) => return Err(StorageError::Backend(e)),
         }
     }

@@ -6,7 +6,6 @@ use std::io;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
-use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -16,10 +15,10 @@ use serde_json::json;
 
 use super::auth::ForgejoRun;
 use super::{BASE_PATH, json_empty, json_error};
-use crate::cache::chunked::{chunk_object_name, complete_chunked_upload};
+use crate::cache::chunked::{ChunkedCommitError, chunk_object_name, complete_chunked_upload};
 use crate::cache::{MAX_STORAGE_PROBES, probe_storage_for_entry, purge_broken_entry};
 use crate::db::entities::{CacheEntry, CacheEntryCoord, MatchRequest, NewUpload, Upload};
-use crate::db::id::{new_upload_id, now_ms};
+use crate::db::id::{new_upload_id, new_uuid, now_ms};
 use crate::metrics::Metrics;
 use crate::routes::blob;
 use crate::state::AppState;
@@ -144,18 +143,23 @@ async fn match_with_healthy_storage(
 
 // -- POST /caches ----------------------------------------------------------
 
+/// Reserves an upload. The body is decoded regardless of
+/// `Content-Type`, like act's `json.NewDecoder`.
 pub(super) async fn reserve(
     State(state): State<AppState>,
     Extension(run): Extension<ForgejoRun>,
-    body: Result<Json<ReserveBody>, JsonRejection>,
+    body: Bytes,
 ) -> Response {
-    let body = match body {
-        Ok(Json(b)) => b,
-        Err(rej) => return json_error(StatusCode::BAD_REQUEST, &rej.body_text()),
+    let body: ReserveBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
     };
     let key = body.key.to_lowercase();
     let id = nonzero_upload_id();
-    let folder = id.to_string();
+    // A UUID rather than the id: ids are drawn from 10^10 values, and a
+    // collision with a live entry's folder would let chunks land in (and
+    // commit copy over) that entry.
+    let folder = new_uuid();
     let upload = NewUpload {
         id,
         coord: CacheEntryCoord {
@@ -211,9 +215,15 @@ pub(super) async fn upload(
     };
 
     let f = &state.metrics.forgejo;
-    if let Err(e) = state.db.increment_upload_started(upload.id).await {
-        f.upload_errors.inc();
-        return internal(&e);
+    // Touch before streaming so `cleanup:uploads` (60 s staleness)
+    // never reaps an upload whose first chunk is still in flight.
+    match state.db.touch_upload(upload.id, now_ms()).await {
+        Ok(true) => {}
+        Ok(false) => return not_reserved(upload.id),
+        Err(e) => {
+            f.upload_errors.inc();
+            return internal(&e);
+        }
     }
     let object = chunk_object_name(&upload.folder_name, start);
     let stream = counted(body, Arc::clone(&state.metrics), |m, n| {
@@ -223,17 +233,26 @@ pub(super) async fn upload(
         f.upload_errors.inc();
         return internal(&e);
     }
-    // Bumps `lastPartUploadedAt`, which keeps `cleanup:uploads` from
-    // reaping an upload that is still receiving chunks.
-    if let Err(e) = state
-        .db
-        .increment_upload_finished(upload.id, now_ms())
-        .await
-    {
-        f.upload_errors.inc();
-        return internal(&e);
+    match state.db.touch_upload(upload.id, now_ms()).await {
+        Ok(true) => json_empty(),
+        Ok(false) => late_chunk(&state, &upload).await,
+        Err(e) => {
+            f.upload_errors.inc();
+            internal(&e)
+        }
     }
-    json_empty()
+}
+
+/// The upload was committed or reaped while this chunk streamed. Its
+/// `chunks/` folder is garbage either way (a commit already copied what
+/// it needed into `parts/`), so drop it rather than leak an object no
+/// row points at, and tell the client the reservation is gone.
+async fn late_chunk(state: &AppState, upload: &Upload) -> Response {
+    let chunks = format!("{}/chunks", upload.folder_name);
+    if let Err(e) = state.storage.delete_folder(&chunks).await {
+        tracing::warn!(error = %e, folder = chunks, "failed to drop late chunk");
+    }
+    not_reserved(upload.id)
 }
 
 /// Parses act's supported `Content-Range` shape, `bytes <start>-<end>/*`
@@ -247,10 +266,14 @@ pub(super) fn parse_content_range(s: &str) -> Option<(u64, u64)> {
 
 // -- POST /caches/:id ------------------------------------------------------
 
-/// Commits the upload. The declared `size` comes from the commit body
-/// (act compares against reserve's `cacheSize`; `@actions/cache` sends
-/// the same value in both). A missing or negative size skips the
-/// check, as act does for clients that don't send one.
+/// Commits the upload.
+///
+/// The declared `size` is read from the commit body, where every v1
+/// client sends it (`@actions/cache` since the v1 toolkit; old clients
+/// such as `actions/cache@v2` send it *only* there). act instead checks
+/// reserve's `cacheSize`, and skips the check when that is 0 — i.e. for
+/// exactly those old clients. A missing or negative commit size skips
+/// the check here; see the deviation list in `mod.rs`.
 pub(super) async fn commit(
     State(state): State<AppState>,
     Extension(run): Extension<ForgejoRun>,
@@ -290,6 +313,7 @@ pub(super) async fn commit(
             );
             json_empty()
         }
+        Err(ChunkedCommitError::UploadGone) => not_reserved(upload.id),
         Err(e) if e.is_client_error() => {
             f.commit_errors.inc();
             tracing::warn!(upload_id = upload.id, error = %e, "forgejo commit rejected");

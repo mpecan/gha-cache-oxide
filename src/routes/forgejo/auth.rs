@@ -52,60 +52,61 @@ pub fn compute_mac(
     timestamp: &str,
     write_isolation_key: &str,
 ) -> Option<String> {
-    let mac = mac_for(secret, repo, run_number, timestamp, write_isolation_key)?;
+    let parts = [repo, run_number, timestamp, write_isolation_key].map(str::as_bytes);
+    let mac = mac_for(secret, parts)?;
     Some(hex::encode(mac.finalize().into_bytes()))
 }
 
-fn mac_for(
-    secret: &str,
-    repo: &str,
-    run_number: &str,
-    timestamp: &str,
-    write_isolation_key: &str,
-) -> Option<HmacSha256> {
+/// MAC over raw bytes: Go sends header values byte-for-byte, and a git
+/// ref used as the write-isolation key need not be UTF-8.
+fn mac_for(secret: &str, parts: [&[u8]; 4]) -> Option<HmacSha256> {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
-    for (i, part) in [repo, run_number, timestamp, write_isolation_key]
-        .iter()
-        .enumerate()
-    {
+    for (i, part) in parts.iter().enumerate() {
         if i > 0 {
             mac.update(b">");
         }
-        mac.update(part.as_bytes());
+        mac.update(part);
     }
     Some(mac)
 }
 
-fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
+fn header_bytes<'a>(headers: &'a HeaderMap, name: &str) -> &'a [u8] {
+    headers.get(name).map_or(&[], |v| v.as_bytes())
+}
+
+fn header(headers: &HeaderMap, name: &str) -> String {
+    String::from_utf8_lossy(header_bytes(headers, name)).into_owned()
 }
 
 /// Validates the `Forgejo-Cache-*` headers against `secret` at
 /// `now_secs`. Returns the run identity on success, `None` on any
 /// validation failure (act collapses them all into one error, too).
 pub(super) fn validate(headers: &HeaderMap, secret: &str, now_secs: i64) -> Option<ForgejoRun> {
-    let repo = header(headers, "forgejo-cache-repo");
-    let run_number = header(headers, "forgejo-cache-runnumber");
-    let timestamp = header(headers, "forgejo-cache-timestamp");
-    let wik = header(headers, "forgejo-cache-writeisolationkey");
-    let provided = hex::decode(header(headers, "forgejo-cache-mac")).ok()?;
+    let repo = header_bytes(headers, "forgejo-cache-repo");
+    let run_number = header_bytes(headers, "forgejo-cache-runnumber");
+    let timestamp = header_bytes(headers, "forgejo-cache-timestamp");
+    let wik = header_bytes(headers, "forgejo-cache-writeisolationkey");
+    let mac_hex = header_bytes(headers, "forgejo-cache-mac");
+    // act compares lowercase hex strings; `hex::decode` alone would also
+    // accept uppercase.
+    if mac_hex.iter().any(u8::is_ascii_uppercase) {
+        return None;
+    }
+    let provided = hex::decode(mac_hex).ok()?;
 
-    let ts: i64 = timestamp.parse().ok()?;
+    let ts: i64 = std::str::from_utf8(timestamp).ok()?.parse().ok()?;
     if ts > now_secs {
         return None;
     }
-    mac_for(secret, repo, run_number, timestamp, wik)?
+    mac_for(secret, [repo, run_number, timestamp, wik])?
         .verify_slice(&provided)
         .ok()?;
 
     Some(ForgejoRun {
-        repo_id: format!("{REPO_ID_PREFIX}{repo}"),
-        write_isolation_key: wik.to_string(),
-        proxy_host: header(headers, "forgejo-cache-host").to_string(),
-        run_id: header(headers, "forgejo-cache-runid").to_string(),
+        repo_id: format!("{REPO_ID_PREFIX}{}", String::from_utf8_lossy(repo)),
+        write_isolation_key: String::from_utf8_lossy(wik).into_owned(),
+        proxy_host: header(headers, "forgejo-cache-host"),
+        run_id: header(headers, "forgejo-cache-runid"),
     })
 }
 
@@ -124,7 +125,7 @@ pub(super) async fn require_forgejo_mac(
     let Some(run) = validate(req.headers(), secret.expose(), now_secs) else {
         state.metrics.forgejo.auth_failures.inc();
         tracing::info!(
-            repo = header(req.headers(), "forgejo-cache-repo"),
+            repo = %header(req.headers(), "forgejo-cache-repo"),
             path = %req.uri().path(),
             "forgejo cache: MAC validation failed",
         );
@@ -174,6 +175,11 @@ mod tests {
         assert_eq!(
             compute_mac(secret, "org/reponame", "42", "1337", "refs/pull/12/head").unwrap(),
             "9ca8f4cb5e1b083ee8cd215215bc00f379b28511d3ef7930bf054767de34766d"
+        );
+        // handler_test.go's fixed `cacheMac`.
+        assert_eq!(
+            compute_mac("secret", "testuser/repo", "1", "0", "").unwrap(),
+            "bc2e9167f9e310baebcead390937264e4c0b21d2fdd49f5b9470d54406099360"
         );
     }
 
@@ -247,6 +253,39 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn validate_rejects_uppercase_mac_like_act() {
+        let mac = compute_mac(SECRET, "o/r", "1", "1000", "")
+            .unwrap()
+            .to_uppercase();
+        assert!(validate(&headers("o/r", "1", "1000", "", &mac), SECRET, 1000).is_none());
+    }
+
+    #[test]
+    fn validate_rejects_truncated_mac() {
+        let mac = compute_mac(SECRET, "o/r", "1", "1000", "").unwrap();
+        let h = headers("o/r", "1", "1000", "", &mac[..32]);
+        assert!(validate(&h, SECRET, 1000).is_none());
+    }
+
+    #[test]
+    fn validate_accepts_non_utf8_isolation_key() {
+        let wik: &[u8] = b"refs/heads/caf\xe9";
+        let mac = hex::encode(
+            mac_for(SECRET, [b"o/r", b"1", b"1000", wik])
+                .unwrap()
+                .finalize()
+                .into_bytes(),
+        );
+        let mut h = headers("o/r", "1", "1000", "", &mac);
+        h.insert(
+            "forgejo-cache-writeisolationkey",
+            HeaderValue::from_bytes(wik).unwrap(),
+        );
+        let run = validate(&h, SECRET, 1000).unwrap();
+        assert_eq!(run.write_isolation_key, "refs/heads/caf\u{fffd}");
     }
 
     #[test]
