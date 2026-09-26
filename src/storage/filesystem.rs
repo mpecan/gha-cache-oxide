@@ -14,7 +14,9 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
-use super::{ByteStream, StorageAdapter, StorageError, validate_object_name};
+use super::{
+    ByteStream, ObjectInfo, StorageAdapter, StorageError, list_under_prefix, validate_object_name,
+};
 
 /// Filesystem-backed implementation of [`StorageAdapter`].
 ///
@@ -106,6 +108,22 @@ impl StorageAdapter for FilesystemAdapter {
             }
         }
         Ok(count)
+    }
+
+    async fn list_folder(&self, folder_name: &str) -> Result<Vec<ObjectInfo>, StorageError> {
+        validate_object_name(folder_name)?;
+        let prefix = ObjectPath::from(folder_name);
+        list_under_prefix(self.store.as_ref(), &prefix).await
+    }
+
+    async fn copy(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        validate_object_name(from)?;
+        validate_object_name(to)?;
+        let (src, dst) = (ObjectPath::from(from), ObjectPath::from(to));
+        self.store
+            .copy(&src, &dst)
+            .await
+            .map_err(|e| translate_not_found(e, from))
     }
 
     async fn signed_url(&self, object_name: &str) -> Result<Option<Url>, StorageError> {
