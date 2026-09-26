@@ -476,13 +476,23 @@ pub async fn find_unused_locations_selects_old_never_downloaded(db: &dyn Db) {
 /// never-downloaded and un-merged; a restore or merge that started in
 /// the meantime keeps it.
 pub async fn delete_location_if_unused_rechecks_predicate(db: &dyn Db) {
-    for loc in ["dliu-unused", "dliu-downloaded", "dliu-merging"] {
+    for loc in [
+        "dliu-unused",
+        "dliu-downloaded",
+        "dliu-merging",
+        "dliu-merged",
+    ] {
         seed_location_with_entry(db, loc, loc, &format!("entry-{loc}"), "scn-dliu").await;
     }
     db.touch_location_downloaded("dliu-downloaded", 1)
         .await
         .unwrap();
     assert!(db.try_mark_merge_started("dliu-merging", 1).await.unwrap());
+    // A finished merge (the post-commit background merge leaves every
+    // entry like this; `mark_merged` keeps `mergeStartedAt`) is still
+    // unused and must be deletable.
+    assert!(db.try_mark_merge_started("dliu-merged", 1).await.unwrap());
+    db.mark_merged("dliu-merged", 2).await.unwrap();
 
     let mut tx = db.begin().await.unwrap();
     assert!(tx.delete_location_if_unused("dliu-unused").await.unwrap());
@@ -492,6 +502,7 @@ pub async fn delete_location_if_unused_rechecks_predicate(db: &dyn Db) {
             .unwrap()
     );
     assert!(!tx.delete_location_if_unused("dliu-merging").await.unwrap());
+    assert!(tx.delete_location_if_unused("dliu-merged").await.unwrap());
     assert!(!tx.delete_location_if_unused("dliu-missing").await.unwrap());
     tx.commit().await.unwrap();
 

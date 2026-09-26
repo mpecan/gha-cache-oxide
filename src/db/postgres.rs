@@ -561,7 +561,8 @@ impl DbTx for PostgresTx<'_> {
     async fn delete_location_if_unused(&mut self, id: &str) -> Result<bool, sqlx::Error> {
         let done = sqlx::query(
             "DELETE FROM storage_locations \
-             WHERE id = $1 AND \"lastDownloadedAt\" IS NULL AND \"mergeStartedAt\" IS NULL",
+             WHERE id = $1 AND \"lastDownloadedAt\" IS NULL \
+             AND (\"mergeStartedAt\" IS NULL OR \"mergedAt\" IS NOT NULL)",
         )
         .bind(id)
         .execute(&mut *self.tx)

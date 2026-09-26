@@ -101,4 +101,7 @@ async fn merge_finishing_after_its_location_was_deleted_leaves_no_blob() {
     let left = adapter.list_folder("fldr-gone").await.unwrap();
     assert!(left.is_empty(), "orphaned merge leaked: {left:?}");
     assert_eq!(tracker.metrics.merges.completed.get(), 0);
+    // Not `failed` either: the upload succeeded and the vanished guard
+    // (not the error path) is what removed it.
+    assert_eq!(tracker.metrics.merges.failed.get(), 0);
 }

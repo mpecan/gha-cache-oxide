@@ -454,7 +454,8 @@ async fn commit_merges_in_the_background_before_first_download() {
             .await
             .unwrap()
             .unwrap();
-        if loc.parts_deleted_at.is_some() {
+        // `completed` is bumped just after finalise commits; wait for both.
+        if loc.parts_deleted_at.is_some() && srv.metrics.merges.completed.get() == 1 {
             break loc;
         }
         assert!(

@@ -170,8 +170,9 @@ Every v1 commit starts a **background merge** of the entry's parts into
 its single `merged` blob, so the first restore is one sequential read
 instead of a merge performed inline at the client's pace (measured ~5×
 slower on Garage). A download that arrives before the merge finishes
-waits for it (then streams `merged`); a failed merge falls back to the
-usual lazy merge on first download. Graceful shutdown waits for
+waits for it (then streams `merged`) — up to 60 s, after which it gets
+`503` + `Retry-After` and `@actions/cache` retries; a failed merge
+falls back to the usual lazy merge on first download. Graceful shutdown waits for
 in-flight merges — give the pod a termination grace period long enough
 for your largest entry (e.g. 60 s), or a killed merge's claim blocks
 that entry's downloads until the startup sweep clears it (1 h). The
