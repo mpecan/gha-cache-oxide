@@ -287,6 +287,26 @@ impl Db for SqliteDb {
         .await
     }
 
+    async fn find_unused_locations(
+        &self,
+        cutoff_ms: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT sl.* FROM storage_locations sl \
+             JOIN cache_entries ce ON ce.locationId = sl.id \
+             WHERE sl.lastDownloadedAt IS NULL AND ce.updatedAt < ? \
+             ORDER BY sl.id \
+             LIMIT ? OFFSET ?",
+        )
+        .bind(cutoff_ms)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     async fn find_orphan_locations(
         &self,
         limit: i64,

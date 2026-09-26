@@ -129,7 +129,7 @@ pub struct CleanupSchedules {
 pub struct SchedulerSpawn {
     pub db: Arc<dyn Db>,
     pub storage: Arc<dyn StorageAdapter>,
-    pub cache_cleanup_older_than_days: u32,
+    pub retention: super::EntryRetention,
     pub schedules: CleanupSchedules,
 }
 
@@ -162,7 +162,7 @@ pub fn spawn_schedulers(spawn: SchedulerSpawn, shutdown: CancellationToken) -> S
     let SchedulerSpawn {
         db,
         storage,
-        cache_cleanup_older_than_days,
+        retention,
         schedules,
     } = spawn;
     let uploads = spawn_uploads(
@@ -177,13 +177,7 @@ pub fn spawn_schedulers(spawn: SchedulerSpawn, shutdown: CancellationToken) -> S
         schedules.hourly,
         shutdown.clone(),
     );
-    let daily = spawn_daily(
-        db,
-        storage,
-        cache_cleanup_older_than_days,
-        schedules.daily,
-        shutdown,
-    );
+    let daily = spawn_daily(db, storage, retention, schedules.daily, shutdown);
     Schedulers {
         uploads,
         hourly,
@@ -210,7 +204,8 @@ pub fn maybe_spawn(
         uploads = ?spawn.schedules.uploads,
         hourly = ?spawn.schedules.hourly,
         daily = ?spawn.schedules.daily,
-        cache_cleanup_older_than_days = spawn.cache_cleanup_older_than_days,
+        cache_cleanup_older_than_days = spawn.retention.older_than_days,
+        cache_cleanup_unused_older_than_days = ?spawn.retention.unused_older_than_days,
         "cleanup schedulers starting (uploads/hourly/daily)",
     );
     Some(spawn_schedulers(spawn, shutdown))
@@ -245,14 +240,14 @@ fn spawn_hourly(
 fn spawn_daily(
     db: Arc<dyn Db>,
     storage: Arc<dyn StorageAdapter>,
-    cache_cleanup_older_than_days: u32,
+    retention: super::EntryRetention,
     schedule: Schedule,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
     spawn_cadence("daily", schedule, shutdown, move || {
         let db = db.clone();
         let storage = storage.clone();
-        async move { run_daily_cycle(db, storage, cache_cleanup_older_than_days).await }
+        async move { run_daily_cycle(db, storage, retention).await }
     })
 }
 
@@ -311,10 +306,9 @@ async fn run_hourly_cycle(db: Arc<dyn Db>, storage: Arc<dyn StorageAdapter>) {
 async fn run_daily_cycle(
     db: Arc<dyn Db>,
     storage: Arc<dyn StorageAdapter>,
-    cache_cleanup_older_than_days: u32,
+    retention: super::EntryRetention,
 ) {
-    let entries_deleted =
-        entries::run(&*db, &*storage, now_ms(), cache_cleanup_older_than_days).await;
+    let entries_deleted = entries::run(&*db, &*storage, now_ms(), retention).await;
     let locations_deleted = locations::run(&*db, &*storage).await;
     tracing::info!(
         entries_deleted,

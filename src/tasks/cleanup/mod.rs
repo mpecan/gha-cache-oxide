@@ -48,6 +48,7 @@ mod scheduler;
 mod test_utils;
 pub(crate) mod uploads;
 
+pub use entries::EntryRetention;
 pub use scheduler::{
     CleanupSchedules, Schedule, SchedulerSpawn, Schedulers, maybe_spawn, spawn_schedulers,
 };
@@ -78,12 +79,12 @@ pub async fn run_all(
     db: &dyn Db,
     storage: &dyn StorageAdapter,
     now_ms: i64,
-    cache_cleanup_older_than_days: u32,
+    retention: EntryRetention,
 ) -> CleanupReport {
     let merges_reset = merges::run(db, now_ms).await;
     let uploads_deleted = uploads::run(db, storage, now_ms).await;
     let parts_deleted = parts::run(db, storage, now_ms).await;
-    let entries_deleted = entries::run(db, storage, now_ms, cache_cleanup_older_than_days).await;
+    let entries_deleted = entries::run(db, storage, now_ms, retention).await;
     let locations_deleted = locations::run(db, storage).await;
     CleanupReport {
         merges_reset,
@@ -259,7 +260,16 @@ mod tests {
         seed_one_per_task(&db).await;
 
         let now = 2 * 86_400_000;
-        let report = run_all(&db, &storage, now, 1).await;
+        let report = run_all(
+            &db,
+            &storage,
+            now,
+            super::EntryRetention {
+                older_than_days: 1,
+                unused_older_than_days: None,
+            },
+        )
+        .await;
 
         assert_eq!(
             report,

@@ -278,6 +278,26 @@ impl Db for PostgresDb {
         .await
     }
 
+    async fn find_unused_locations(
+        &self,
+        cutoff_ms: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT sl.* FROM storage_locations sl \
+             JOIN cache_entries ce ON ce.\"locationId\" = sl.id \
+             WHERE sl.\"lastDownloadedAt\" IS NULL AND ce.\"updatedAt\" < $1 \
+             ORDER BY sl.id \
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(cutoff_ms)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     async fn find_orphan_locations(
         &self,
         limit: i64,

@@ -65,8 +65,9 @@
 //! - Empty keys in `?keys=` are ignored. act would turn one into a
 //!   match-anything prefix.
 //! - GC follows oxide's own cleanup tasks, not act's 7d/30d policy.
-//!   Notably, entries that are never downloaded are never expired
-//!   (upstream parity, see `find_expired_locations`).
+//!   Entries that are never downloaded are only expired when
+//!   `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` is set (unset = upstream
+//!   parity; 7 with `CACHE_CLEANUP_OLDER_THAN_DAYS=30` ≈ act's policy).
 //!
 //! Same as act, worth knowing: the MAC timestamp is minted once per job
 //! on the runner and never expires, so there is no replay window but

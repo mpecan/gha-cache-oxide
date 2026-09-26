@@ -16,6 +16,7 @@ fn minimal_env() -> Vec<(&'static str, Option<&'static str>)> {
         ("PORT", None),
         ("LOG_FORMAT", None),
         ("CACHE_CLEANUP_OLDER_THAN_DAYS", None),
+        ("CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS", None),
         ("DISABLE_CLEANUP_JOBS", None),
         ("CLEANUP_UPLOADS_SCHEDULE", None),
         ("CLEANUP_HOURLY_SCHEDULE", None),
@@ -138,6 +139,61 @@ fn cache_cleanup_days_defaults_to_90() {
             90
         );
     });
+}
+
+#[test]
+fn cache_cleanup_unused_days_is_off_by_default() {
+    with_env(&minimal_env(), || {
+        assert_eq!(
+            AppConfig::from_env()
+                .unwrap()
+                .cache_cleanup_unused_older_than_days,
+            None
+        );
+    });
+}
+
+#[test]
+fn cache_cleanup_unused_days_parses_custom() {
+    let mut setup = minimal_env();
+    set(
+        &mut setup,
+        "CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS",
+        Some("7"),
+    );
+    with_env(&setup, || {
+        assert_eq!(
+            AppConfig::from_env()
+                .unwrap()
+                .cache_cleanup_unused_older_than_days,
+            Some(7)
+        );
+    });
+}
+
+#[test]
+fn cache_cleanup_unused_days_rejects_zero_and_garbage() {
+    for bad in ["0", "seven", "-1"] {
+        let mut setup = minimal_env();
+        set(
+            &mut setup,
+            "CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS",
+            Some(bad),
+        );
+        with_env(&setup, || {
+            let err = AppConfig::from_env().unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+        });
+    }
 }
 
 #[test]
