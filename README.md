@@ -64,7 +64,8 @@ wall-clock aligned, just like upstream cron. Set
 download**, exactly like upstream — so an entry that is saved but never
 restored never expires. `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` is an
 opt-in (not in upstream) that also reaps never-downloaded entries once
-they were committed more than that many days ago, in the same daily
+they were last committed more than that many days ago (re-saving the
+same key restarts the clock), in the same daily
 `cleanup:cache-entries` pass. Unset keeps upstream behaviour; `0` is
 rejected. `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS=7` with
 `CACHE_CLEANUP_OLDER_THAN_DAYS=30` mirrors the Forgejo runner's own

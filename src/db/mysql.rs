@@ -574,6 +574,17 @@ impl DbTx for MysqlTx<'_> {
         }
     }
 
+    async fn delete_location_if_unused(&mut self, id: &str) -> Result<bool, sqlx::Error> {
+        let done = sqlx::query(
+            "DELETE FROM storage_locations \
+             WHERE id = ? AND `lastDownloadedAt` IS NULL AND `mergeStartedAt` IS NULL",
+        )
+        .bind(id)
+        .execute(&mut *self.tx)
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
     async fn delete_storage_location(&mut self, id: &str) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM storage_locations WHERE id = ?")
             .bind(id)

@@ -471,3 +471,46 @@ pub async fn find_unused_locations_selects_old_never_downloaded(db: &dyn Db) {
     let at_cutoff = db.find_unused_locations(50_000, 100, 0).await.unwrap();
     assert!(!at_cutoff.iter().any(|l| l.id == "unused-old"));
 }
+
+/// `delete_location_if_unused` deletes only while the location is still
+/// never-downloaded and un-merged; a restore or merge that started in
+/// the meantime keeps it.
+pub async fn delete_location_if_unused_rechecks_predicate(db: &dyn Db) {
+    for loc in ["dliu-unused", "dliu-downloaded", "dliu-merging"] {
+        seed_location_with_entry(db, loc, loc, &format!("entry-{loc}"), "scn-dliu").await;
+    }
+    db.touch_location_downloaded("dliu-downloaded", 1)
+        .await
+        .unwrap();
+    assert!(db.try_mark_merge_started("dliu-merging", 1).await.unwrap());
+
+    let mut tx = db.begin().await.unwrap();
+    assert!(tx.delete_location_if_unused("dliu-unused").await.unwrap());
+    assert!(
+        !tx.delete_location_if_unused("dliu-downloaded")
+            .await
+            .unwrap()
+    );
+    assert!(!tx.delete_location_if_unused("dliu-merging").await.unwrap());
+    assert!(!tx.delete_location_if_unused("dliu-missing").await.unwrap());
+    tx.commit().await.unwrap();
+
+    assert!(
+        db.find_location_for_entry("entry-dliu-unused")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.find_location_for_entry("entry-dliu-downloaded")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        db.find_location_for_entry("entry-dliu-merging")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

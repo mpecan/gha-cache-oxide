@@ -127,8 +127,11 @@ async fn run_pass(db: &dyn Db, storage: &dyn StorageAdapter, selector: Selector)
         let page_len = page.len();
         let mut iter_failures = 0_i64;
         for location in page {
-            match delete_one(db, storage, &location).await {
-                Ok(()) => deleted += 1,
+            match delete_one(db, storage, selector, &location).await {
+                Ok(true) => deleted += 1,
+                // Kept because it is in use now; it is no longer in the
+                // unused set, so the offset needs no adjustment.
+                Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -151,16 +154,28 @@ async fn run_pass(db: &dyn Db, storage: &dyn StorageAdapter, selector: Selector)
     deleted
 }
 
+/// Deletes one location (entry cascades) and then its folder. Returns
+/// `Ok(false)` when an unused-pass row turned out to be in use by the
+/// time of the delete (a first restore raced the pass) and was kept.
 async fn delete_one(
     db: &dyn Db,
     storage: &dyn StorageAdapter,
+    selector: Selector,
     location: &StorageLocation,
-) -> Result<(), EntriesCleanupError> {
+) -> Result<bool, EntriesCleanupError> {
     let mut tx = db.begin().await?;
-    tx.delete_storage_location(&location.id).await?;
+    match selector {
+        Selector::DownloadedBefore(_) => tx.delete_storage_location(&location.id).await?,
+        Selector::NeverDownloadedCommittedBefore(_) => {
+            if !tx.delete_location_if_unused(&location.id).await? {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+    }
     tx.commit().await?;
     storage.delete_folder(&location.folder_name).await?;
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -416,5 +431,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(run(&db, &storage, now, unused(30, 7)).await, 2);
+        let mut folders = storage.deleted_folders();
+        folders.sort();
+        assert_eq!(folders, vec!["folder-stale", "folder-unused"]);
+    }
+
+    /// A location that got downloaded (or started merging) after the
+    /// page query must survive: the delete re-checks the predicate.
+    #[tokio::test]
+    async fn unused_delete_rechecks_that_the_location_is_still_unused() {
+        let db = fresh_db().await;
+        let storage = FakeStorage::new();
+        seed_committed(&db, "raced", 0).await;
+        let location = db.find_unused_locations(1, 10, 0).await.unwrap().remove(0);
+        db.touch_location_downloaded("raced", 5).await.unwrap();
+
+        let selector = super::Selector::NeverDownloadedCommittedBefore(1);
+        let deleted = super::delete_one(&db, &storage, selector, &location)
+            .await
+            .unwrap();
+        assert!(!deleted);
+        assert!(storage.deleted_folders().is_empty());
+        assert!(
+            db.find_location_for_entry("entry-raced")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

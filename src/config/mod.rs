@@ -34,8 +34,8 @@ pub struct AppConfig {
     pub log_format: LogFormat,
     pub cache_cleanup_older_than_days: u32,
     /// Opt-in expiry for entries that were **never** downloaded
-    /// (`CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS`), measured from commit
-    /// time. `None` (unset) keeps them forever — upstream parity, since
+    /// (`CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS`), measured from the last
+    /// commit of the entry (re-saving a key restarts the clock). `None` (unset) keeps them forever — upstream parity, since
     /// `CACHE_CLEANUP_OLDER_THAN_DAYS` keys on `lastDownloadedAt` and a
     /// NULL never expires. Not an upstream knob; act (the Forgejo runner
     /// cache) uses 7 days for unused and 30 for used entries.

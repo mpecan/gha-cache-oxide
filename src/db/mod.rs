@@ -580,6 +580,15 @@ pub trait DbTx: Send {
     /// Returns `sqlx::Error` on delete failure.
     async fn delete_storage_location(&mut self, id: &str) -> Result<(), sqlx::Error>;
 
+    /// Deletes a `storage_locations` row only if it is still unused:
+    /// never downloaded and no lazy merge started. Returns `true` when
+    /// it deleted. The unused-entries cleanup pass uses this so a first
+    /// restore that lands between its page query and the delete wins.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on delete failure.
+    async fn delete_location_if_unused(&mut self, id: &str) -> Result<bool, sqlx::Error>;
+
     /// Deletes an `uploads` row by id inside this transaction. Returns
     /// `true` when a row was removed; commit paths treat `false` as
     /// "someone else already consumed this upload" and roll back.

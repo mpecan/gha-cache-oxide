@@ -172,6 +172,20 @@ fn cache_cleanup_unused_days_parses_custom() {
 }
 
 #[test]
+fn cache_cleanup_unused_days_empty_is_off() {
+    let mut setup = minimal_env();
+    set(&mut setup, "CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS", Some(""));
+    with_env(&setup, || {
+        assert_eq!(
+            AppConfig::from_env()
+                .unwrap()
+                .cache_cleanup_unused_older_than_days,
+            None
+        );
+    });
+}
+
+#[test]
 fn cache_cleanup_unused_days_rejects_zero_and_garbage() {
     for bad in ["0", "seven", "-1"] {
         let mut setup = minimal_env();
