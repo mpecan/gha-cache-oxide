@@ -1,0 +1,406 @@
+//! Per-source Forgejo cache counters, labelled `{repo, key_prefix}`.
+//!
+//! `repo` is the MAC-validated `Forgejo-Cache-Repo` (`owner/name`), so a
+//! client cannot invent label values. `key_prefix` is a coarse class of
+//! the cache key ([`key_prefix`]): the tool that wrote it, not the key
+//! itself. Distinct label sets are capped at [`MAX_SOURCES`]; beyond
+//! that everything is counted under `repo="_other", key_prefix="_other"`,
+//! so cardinality stays bounded whatever the workload does.
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use super::Counter;
+
+/// Upper bound on distinct `{repo, key_prefix}` label sets.
+pub const MAX_SOURCES: usize = 256;
+
+/// Upper bound on distinct `key_prefix` values per repo, so one repo's
+/// unusual keys cannot starve the others. Beyond it the repo keeps its
+/// label and the prefix becomes `_other`.
+pub const MAX_PREFIXES_PER_REPO: usize = 32;
+
+/// Label value used once [`MAX_SOURCES`] is reached.
+pub const OVERFLOW: &str = "_other";
+
+/// Longest `key_prefix` segment kept; longer segments are truncated.
+const SEGMENT_MAX: usize = 32;
+
+/// Longest `repo` label kept.
+const REPO_MAX: usize = 100;
+
+/// Counters for one `{repo, key_prefix}` source.
+#[derive(Debug, Default)]
+pub struct SourceCounters {
+    pub hits: Counter,
+    pub misses: Counter,
+    pub upload_bytes: Counter,
+    pub download_bytes: Counter,
+    pub commits: Counter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct Source {
+    repo: String,
+    key_prefix: String,
+}
+
+/// Registry of per-source counters.
+#[derive(Debug, Default)]
+pub struct SourceMetrics {
+    inner: Mutex<Registry>,
+}
+
+#[derive(Debug, Default)]
+struct Registry {
+    sources: HashMap<Source, Arc<SourceCounters>>,
+    /// Distinct prefixes seen per repo (for [`MAX_PREFIXES_PER_REPO`]).
+    prefixes_per_repo: HashMap<String, usize>,
+    /// Whether the overflow warning has been logged (once per cap).
+    warned_global: bool,
+    warned_repos: std::collections::HashSet<String>,
+}
+
+/// Classifies a cache key by the tool that wrote it.
+///
+/// The first `-`-separated segment, plus the second when it is purely
+/// alphabetic and not hash-like: `v0-rust-…` → `v0-rust`,
+/// `node-cache-Linux-…` → `node-cache`, `buildkit-blob-1-sha256:…` →
+/// `buildkit-blob`, `index-buildkit-1-…` → `index-buildkit`,
+/// `Linux-x64-…` → `linux`. Segments that look like data rather than a
+/// name collapse so they cannot mint a label per key: all digits →
+/// `_num`, hex or letters-and-digits of 7+ chars → `_hash` (so
+/// `${{ github.sha }}-build` → `_hash-build`). Lowercased, restricted
+/// to `[a-z0-9_.]`, segments capped at 32 chars; empty → `_empty`.
+pub fn key_prefix(key: &str) -> String {
+    let mut parts = key.split('-').map(clean_segment);
+    let first = parts.next().unwrap_or_default();
+    if first.is_empty() {
+        return "_empty".to_string();
+    }
+    let first = classify(first);
+    match parts.next() {
+        Some(second)
+            if !second.is_empty()
+                && second.bytes().all(|b| b.is_ascii_lowercase())
+                && !looks_like_data(&second) =>
+        {
+            format!("{first}-{second}")
+        }
+        _ => first,
+    }
+}
+
+/// Minimum length at which a hex-only or mixed letters-and-digits
+/// segment is treated as data (a short git SHA is 7).
+const DATA_MIN: usize = 7;
+
+fn looks_like_data(segment: &str) -> bool {
+    let has_digit = segment.bytes().any(|b| b.is_ascii_digit());
+    let has_letter = segment.bytes().any(|b| b.is_ascii_lowercase());
+    let all_hex = segment.bytes().all(|b| b.is_ascii_hexdigit());
+    segment.len() >= DATA_MIN && (all_hex || (has_digit && has_letter))
+}
+
+fn classify(segment: String) -> String {
+    if segment.bytes().all(|b| b.is_ascii_digit()) {
+        "_num".to_string()
+    } else if looks_like_data(&segment) {
+        "_hash".to_string()
+    } else {
+        segment
+    }
+}
+
+fn clean_segment(segment: &str) -> String {
+    segment
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '.')
+        .take(SEGMENT_MAX)
+        .collect()
+}
+
+impl SourceMetrics {
+    /// Counters for `repo` (`owner/name`) and the class of `key`.
+    pub fn get(&self, repo: &str, key: &str) -> Arc<SourceCounters> {
+        let source = Source {
+            repo: repo.chars().take(REPO_MAX).collect(),
+            key_prefix: key_prefix(key),
+        };
+        let mut reg = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(c) = reg.sources.get(&source) {
+            return Arc::clone(c);
+        }
+        let source = reg.admit(source);
+        Arc::clone(reg.sources.entry(source).or_default())
+    }
+
+    /// Every tracked source and its counters, sorted by label. Clones the
+    /// `Arc`s so the lock is released before any formatting or summing.
+    fn snapshot(&self) -> Vec<(Source, Arc<SourceCounters>)> {
+        let mut v: Vec<_> = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sources
+            .iter()
+            .map(|(s, c)| (s.clone(), Arc::clone(c)))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    /// Sum of every source's counters, for unlabelled totals in tests.
+    pub fn totals(&self) -> SourceCounters {
+        let t = SourceCounters::default();
+        for (_, c) in self.snapshot() {
+            t.hits.add(c.hits.get());
+            t.misses.add(c.misses.get());
+            t.upload_bytes.add(c.upload_bytes.get());
+            t.download_bytes.add(c.download_bytes.get());
+            t.commits.add(c.commits.get());
+        }
+        t
+    }
+
+    pub(super) fn render(&self, out: &mut String) {
+        let sources = self.snapshot();
+
+        header(
+            out,
+            "gha_cache_oxide_forgejo_cache_lookups_total",
+            "Forgejo v1 cache lookups by result, repository and key prefix.",
+        );
+        for (s, c) in &sources {
+            for (result, n) in [("hit", c.hits.get()), ("miss", c.misses.get())] {
+                let _ = writeln!(
+                    out,
+                    "gha_cache_oxide_forgejo_cache_lookups_total{{result=\"{result}\",{}}} {n}",
+                    labels(s)
+                );
+            }
+        }
+        let per_source: [Family; 3] = [
+            (
+                "gha_cache_oxide_forgejo_upload_bytes_total",
+                "Bytes uploaded through the Forgejo v1 dialect.",
+                |c| c.upload_bytes.get(),
+            ),
+            (
+                "gha_cache_oxide_forgejo_download_bytes_total",
+                "Bytes downloaded through the Forgejo v1 dialect.",
+                |c| c.download_bytes.get(),
+            ),
+            (
+                "gha_cache_oxide_forgejo_commits_total",
+                "Committed Forgejo v1 cache entries.",
+                |c| c.commits.get(),
+            ),
+        ];
+        for (name, help, value) in per_source {
+            header(out, name, help);
+            for (s, c) in &sources {
+                let _ = writeln!(out, "{name}{{{}}} {}", labels(s), value(c));
+            }
+        }
+    }
+}
+
+/// `(metric name, help text, value accessor)` for one per-source family.
+type Family = (&'static str, &'static str, fn(&SourceCounters) -> u64);
+
+impl Registry {
+    /// Maps a not-yet-tracked `source` to the label set it may use:
+    /// itself, `{repo, _other}` once the repo has too many prefixes, or
+    /// `{_other, _other}` once the global cap is reached. Logs the first
+    /// time each cap trips.
+    fn admit(&mut self, source: Source) -> Source {
+        if self.sources.len() >= MAX_SOURCES {
+            if !self.warned_global {
+                self.warned_global = true;
+                tracing::warn!(
+                    max = MAX_SOURCES,
+                    "forgejo metrics: label-set cap reached; new sources are counted as repo=\"_other\""
+                );
+            }
+            return Source {
+                repo: OVERFLOW.into(),
+                key_prefix: OVERFLOW.into(),
+            };
+        }
+        let seen = self
+            .prefixes_per_repo
+            .entry(source.repo.clone())
+            .or_default();
+        if *seen >= MAX_PREFIXES_PER_REPO {
+            if self.warned_repos.insert(source.repo.clone()) {
+                tracing::warn!(
+                    repo = %source.repo,
+                    max = MAX_PREFIXES_PER_REPO,
+                    "forgejo metrics: per-repo key_prefix cap reached; new prefixes are counted as \"_other\""
+                );
+            }
+            return Source {
+                repo: source.repo,
+                key_prefix: OVERFLOW.into(),
+            };
+        }
+        *seen += 1;
+        source
+    }
+}
+
+fn header(out: &mut String, name: &str, help: &str) {
+    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter");
+}
+
+fn labels(s: &Source) -> String {
+    format!(
+        "repo=\"{}\",key_prefix=\"{}\"",
+        escape(&s.repo),
+        escape(&s.key_prefix)
+    )
+}
+
+/// Prometheus text-format label-value escaping.
+fn escape(v: &str) -> String {
+    v.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_prefix_classifies_common_tools() {
+        for (key, want) in [
+            ("v0-rust-build-Linux-x64-abc123", "v0-rust"),
+            ("node-cache-Linux-x64-pnpm-9f2e", "node-cache"),
+            ("buildkit-blob-1-sha256:0123abcd", "buildkit-blob"),
+            ("index-buildkit-1-89abcdef", "index-buildkit"),
+            ("setup-go-Linux-x64-go-1.23", "setup-go"),
+            ("Linux-x64-cargo-deadbeef", "linux"),
+            ("docker", "docker"),
+            ("", "_empty"),
+            ("-leading-dash", "_empty"),
+            ("weird\"chars\n-x", "weirdchars-x"),
+            // Data-looking segments collapse instead of minting labels.
+            (
+                "3f2a9c1d4e5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f-build",
+                "_hash-build",
+            ),
+            ("1790419274879-deps", "_num-deps"),
+            ("a1b2c3d-x", "_hash-x"),
+            ("cargo-deadbeefcafe", "cargo"),
+            ("v0-abcdefa", "v0"),
+        ] {
+            assert_eq!(key_prefix(key), want, "{key:?}");
+        }
+        // Not hex and no digits, so it is kept (truncated), not collapsed.
+        let long = "g".repeat(100);
+        assert_eq!(key_prefix(&long).len(), 32);
+        assert_eq!(key_prefix(&"a".repeat(100)), "_hash", "long hex collapses");
+    }
+
+    #[test]
+    fn same_source_shares_counters() {
+        let m = SourceMetrics::default();
+        m.get("o/r", "v0-rust-a").hits.inc();
+        m.get("o/r", "v0-rust-b").hits.inc();
+        assert_eq!(m.get("o/r", "v0-rust-zzz").hits.get(), 2);
+        assert_eq!(m.get("o/other", "v0-rust-a").hits.get(), 0);
+    }
+
+    #[test]
+    fn cardinality_is_capped_into_overflow() {
+        let m = SourceMetrics::default();
+        for i in 0..MAX_SOURCES + 50 {
+            m.get(&format!("owner/repo{i}"), "k-x").misses.inc();
+        }
+        let reg = m.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let map = &reg.sources;
+        assert_eq!(map.len(), MAX_SOURCES + 1, "cap plus one overflow bucket");
+        let overflow = Source {
+            repo: OVERFLOW.into(),
+            key_prefix: OVERFLOW.into(),
+        };
+        assert_eq!(map[&overflow].misses.get(), 50, "every call past the cap");
+        drop(reg);
+        assert_eq!(
+            m.totals().misses.get(),
+            u64::try_from(MAX_SOURCES + 50).unwrap_or(0)
+        );
+    }
+
+    #[test]
+    fn one_repo_cannot_exhaust_the_global_cap() {
+        let m = SourceMetrics::default();
+        for i in 0..MAX_PREFIXES_PER_REPO + 10 {
+            m.get("noisy/repo", &format!("tool{i}-x")).misses.inc();
+        }
+        let other = m.get("noisy/repo", "brand-new");
+        assert_eq!(
+            other.misses.get(),
+            10,
+            "extra prefixes fold into the repo's _other"
+        );
+        let quiet = m.get("quiet/repo", "v0-rust-x");
+        quiet.hits.inc();
+        assert_eq!(
+            quiet.hits.get(),
+            1,
+            "other repos still get their own labels"
+        );
+        let mut out = String::new();
+        m.render(&mut out);
+        assert!(out.contains("repo=\"noisy/repo\",key_prefix=\"_other\""));
+    }
+
+    #[test]
+    fn empty_registry_still_renders_help_and_type() {
+        let mut out = String::new();
+        SourceMetrics::default().render(&mut out);
+        for name in [
+            "gha_cache_oxide_forgejo_cache_lookups_total",
+            "gha_cache_oxide_forgejo_upload_bytes_total",
+            "gha_cache_oxide_forgejo_download_bytes_total",
+            "gha_cache_oxide_forgejo_commits_total",
+        ] {
+            assert!(out.contains(&format!("# TYPE {name} counter\n")), "{name}");
+        }
+    }
+
+    #[test]
+    fn renders_labelled_families_sorted_and_escaped() {
+        let m = SourceMetrics::default();
+        m.get("zed/app", "node-cache-x").misses.inc();
+        let a = m.get("ann/lib", "v0-rust-x");
+        a.hits.add(3);
+        a.upload_bytes.add(10);
+        a.download_bytes.add(20);
+        a.commits.inc();
+        m.get("odd\"repo", "k").hits.inc();
+        let mut out = String::new();
+        m.render(&mut out);
+
+        let l = "repo=\"ann/lib\",key_prefix=\"v0-rust\"";
+        assert!(out.contains(&format!(
+            "gha_cache_oxide_forgejo_cache_lookups_total{{result=\"hit\",{l}}} 3\n"
+        )));
+        assert!(out.contains(&format!(
+            "gha_cache_oxide_forgejo_upload_bytes_total{{{l}}} 10\n"
+        )));
+        assert!(out.contains(&format!(
+            "gha_cache_oxide_forgejo_download_bytes_total{{{l}}} 20\n"
+        )));
+        assert!(out.contains(&format!("gha_cache_oxide_forgejo_commits_total{{{l}}} 1\n")));
+        assert!(out.contains("repo=\"odd\\\"repo\""), "quote escaped: {out}");
+        let ann = out.find("repo=\"ann/lib\"").unwrap_or(usize::MAX);
+        let zed = out.find("repo=\"zed/app\"").unwrap_or(0);
+        assert!(ann < zed, "sorted by repo");
+    }
+}

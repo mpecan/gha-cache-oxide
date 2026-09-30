@@ -19,7 +19,10 @@ import (
 func main() {
 	target, secret, repo := os.Args[1], os.Args[2], os.Args[4]
 	port, _ := strconv.Atoi(os.Args[3])
-	h, err := cacheproxy.StartHandler(target, "127.0.0.1", uint16(port), "", secret, nil, nil)
+	// PROXY_HOST_OVERRIDE sets the runner's cache_proxy_host override:
+	// the base URL advertised in archiveLocation. Needed when the client
+	// runs in a container (e.g. BuildKit) and 127.0.0.1 is not the host.
+	h, err := cacheproxy.StartHandler(target, "127.0.0.1", uint16(port), os.Getenv("PROXY_HOST_OVERRIDE"), secret, nil, nil)
 	if err != nil {
 		panic(err)
 	}

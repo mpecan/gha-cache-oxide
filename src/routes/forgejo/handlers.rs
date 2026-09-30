@@ -2,28 +2,25 @@
 //! `artifactcache/handler.go`; see the module docs in `mod.rs` for the
 //! model mapping and the deliberate deviations.
 
-use std::io;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
 use serde_json::json;
 
 use super::auth::ForgejoRun;
+use super::support::{counted, internal, isolation_mismatch, not_reserved, parse_content_range};
 use super::{BASE_PATH, json_empty, json_error};
 use crate::cache::chunked::{ChunkedCommitError, chunk_object_name, complete_chunked_upload};
 use crate::cache::{MAX_STORAGE_PROBES, probe_storage_for_entry, purge_broken_entry};
 use crate::db::entities::{CacheEntry, CacheEntryCoord, MatchRequest, NewUpload, Upload};
 use crate::db::id::{new_upload_id, new_uuid, now_ms};
 use crate::merge;
-use crate::metrics::Metrics;
 use crate::routes::blob;
 use crate::state::AppState;
-use crate::storage::ByteStream;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct FindQuery {
@@ -63,7 +60,7 @@ pub(super) async fn find(
     let requested: Vec<&str> = q.keys.split(',').filter(|k| !k.is_empty()).collect();
     let keys: Vec<String> = requested.iter().map(|k| k.to_lowercase()).collect();
     let Some((primary, restore)) = keys.split_first() else {
-        return miss(&state);
+        return miss(&state, &run, "");
     };
     let restore: Vec<&str> = restore.iter().map(String::as_str).collect();
 
@@ -80,12 +77,12 @@ pub(super) async fn find(
             repo_id: &run.repo_id,
         };
         match match_with_healthy_storage(&state, req).await {
-            Ok(Some(entry)) => return hit(&state, &run, &entry, &requested),
+            Ok(Some(entry)) => return hit(&state, &run, &entry, &requested, primary),
             Ok(None) => {}
             Err(resp) => return resp,
         }
     }
-    miss(&state)
+    miss(&state, &run, primary)
 }
 
 /// `cacheKey` for a hit. Keys are stored and matched lowercased (as in
@@ -102,8 +99,22 @@ fn display_key<'a>(entry: &'a CacheEntry, requested: &[&'a str]) -> &'a str {
         .unwrap_or(&entry.key)
 }
 
-fn hit(state: &AppState, run: &ForgejoRun, entry: &CacheEntry, requested: &[&str]) -> Response {
-    state.metrics.forgejo.find_hits.inc();
+/// Lookups are attributed to the primary requested key: that is what the
+/// workflow asked for, whichever entry ends up matching.
+fn hit(
+    state: &AppState,
+    run: &ForgejoRun,
+    entry: &CacheEntry,
+    requested: &[&str],
+    primary: &str,
+) -> Response {
+    state
+        .metrics
+        .forgejo
+        .sources
+        .get(run.repo(), primary)
+        .hits
+        .inc();
     let archive_location = format!(
         "{}/{}{BASE_PATH}/artifacts/{}",
         run.proxy_host, run.run_id, entry.id
@@ -116,8 +127,14 @@ fn hit(state: &AppState, run: &ForgejoRun, entry: &CacheEntry, requested: &[&str
     .into_response()
 }
 
-fn miss(state: &AppState) -> Response {
-    state.metrics.forgejo.find_misses.inc();
+fn miss(state: &AppState, run: &ForgejoRun, primary: &str) -> Response {
+    state
+        .metrics
+        .forgejo
+        .sources
+        .get(run.repo(), primary)
+        .misses
+        .inc();
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -239,9 +256,8 @@ pub(super) async fn upload(
         }
     }
     let object = chunk_object_name(&upload.folder_name, start);
-    let stream = counted(body, Arc::clone(&state.metrics), |m, n| {
-        m.forgejo.upload_bytes.add(n);
-    });
+    let source = state.metrics.forgejo.sources.get(run.repo(), &upload.key);
+    let stream = counted(body, source, |c, n| c.upload_bytes.add(n));
     if let Err(e) = state.storage.upload_stream(&object, stream).await {
         f.upload_errors.inc();
         return internal(&e);
@@ -266,15 +282,6 @@ async fn late_chunk(state: &AppState, upload: &Upload) -> Response {
         tracing::warn!(error = %e, folder = chunks, "failed to drop late chunk");
     }
     not_reserved(upload.id)
-}
-
-/// Parses act's supported `Content-Range` shape, `bytes <start>-<end>/*`
-/// (the total may be anything, and is ignored).
-pub(super) fn parse_content_range(s: &str) -> Option<(u64, u64)> {
-    let s = s.strip_prefix("bytes ").unwrap_or(s);
-    let range = s.split_once('/').map_or(s, |(r, _)| r);
-    let (a, b) = range.split_once('-')?;
-    Some((a.parse().ok()?, b.parse().ok()?))
 }
 
 // -- POST /caches/:id ------------------------------------------------------
@@ -317,7 +324,7 @@ pub(super) async fn commit(
     .await;
     match result {
         Ok(committed) => {
-            f.commits.inc();
+            f.sources.get(run.repo(), &upload.key).commits.inc();
             tracing::info!(
                 upload_id = upload.id,
                 key = upload.key,
@@ -409,12 +416,13 @@ pub(super) async fn get_artifact(
     }
 
     let metrics = Arc::clone(&state.metrics);
-    let resp = blob::download(State(state), Path(entry.id)).await;
+    let resp = blob::download(State(state), Path(entry.id.clone())).await;
     if !resp.status().is_success() {
         return resp;
     }
+    let source = metrics.forgejo.sources.get(run.repo(), &entry.key);
     let (parts, body) = resp.into_parts();
-    let counted = counted(body, metrics, |m, n| m.forgejo.download_bytes.add(n));
+    let counted = counted(body, source, |c, n| c.download_bytes.add(n));
     Response::from_parts(parts, Body::from_stream(counted))
 }
 
@@ -424,60 +432,4 @@ pub(super) async fn get_artifact(
 /// supported over this API); so do we.
 pub(super) async fn clean() -> Response {
     json_empty()
-}
-
-// -- helpers ---------------------------------------------------------------
-
-/// Wraps `body` in a stream that reports every chunk's length to
-/// `record` as it passes through.
-fn counted(body: Body, metrics: Arc<Metrics>, record: fn(&Metrics, u64)) -> ByteStream {
-    body.into_data_stream()
-        .inspect_ok(move |chunk| record(&metrics, chunk.len() as u64))
-        .map_err(io::Error::other)
-        .boxed()
-}
-
-fn not_reserved(id: impl std::fmt::Display) -> Response {
-    json_error(StatusCode::NOT_FOUND, &format!("cache {id}: not reserved"))
-}
-
-fn isolation_mismatch(run: &ForgejoRun, entry_scope: &str) -> Response {
-    json_error(
-        StatusCode::FORBIDDEN,
-        &format!(
-            "cache authorized for write isolation {:?}, but attempting to operate on {entry_scope:?}",
-            run.write_isolation_key
-        ),
-    )
-}
-
-fn internal(e: &dyn std::fmt::Display) -> Response {
-    tracing::error!(error = %e, "forgejo cache: internal error");
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_content_range;
-
-    #[test]
-    fn parses_act_content_range_shapes() {
-        assert_eq!(parse_content_range("bytes 0-99/*"), Some((0, 99)));
-        assert_eq!(parse_content_range("bytes 100-199/200"), Some((100, 199)));
-        assert_eq!(parse_content_range("bytes 5-9"), Some((5, 9)));
-    }
-
-    #[test]
-    fn rejects_malformed_content_range() {
-        for s in [
-            "",
-            "bytes",
-            "bytes -1/*",
-            "bytes a-b/*",
-            "bytes 0-/*",
-            "bytes 1/*",
-        ] {
-            assert_eq!(parse_content_range(s), None, "{s:?}");
-        }
-    }
 }

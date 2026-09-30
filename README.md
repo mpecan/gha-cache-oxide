@@ -179,10 +179,44 @@ that entry's downloads until the startup sweep clears it (1 h). The
 v2 surface keeps upstream's merge-on-first-download.
 
 Prometheus counters for the dialect are served at `GET /metrics`
-(`gha_cache_oxide_forgejo_{cache_lookups,upload_bytes,download_bytes,upload_errors,commits,commit_errors,auth_failures}_total`),
-plus `gha_cache_oxide_merges_total{result}` and the
-`gha_cache_oxide_merge_duration_seconds` histogram (all merges, lazy or
-background).
+(unauthenticated; mounted only with the dialect):
+
+| Metric | Labels |
+|---|---|
+| `gha_cache_oxide_forgejo_cache_lookups_total` | `result` (`hit`/`miss`), `repo`, `key_prefix` |
+| `gha_cache_oxide_forgejo_upload_bytes_total` | `repo`, `key_prefix` |
+| `gha_cache_oxide_forgejo_download_bytes_total` | `repo`, `key_prefix` |
+| `gha_cache_oxide_forgejo_commits_total` | `repo`, `key_prefix` |
+| `gha_cache_oxide_forgejo_{upload_errors,commit_errors,auth_failures}_total` | — |
+| `gha_cache_oxide_merges_total` | `result` (`ok`/`error`) |
+| `gha_cache_oxide_merge_duration_seconds` (histogram) | — |
+
+`repo` is the MAC-validated `owner/name` from the runner's cache proxy.
+`key_prefix` classifies the cache key by the tool that wrote it — the
+first `-`-segment, plus the second if it is purely alphabetic, so
+`v0-rust-…` → `v0-rust`, `node-cache-…` → `node-cache`, BuildKit's
+`buildkit-blob-…` / `index-buildkit-…` → `buildkit-blob` /
+`index-buildkit`. Lookups are attributed to the primary requested key;
+bytes and commits to the entry's key. Segments that look like data
+collapse (`_num` for digits, `_hash` for 7+ hex / letters-and-digits),
+so `${{ github.sha }}-build` is `_hash-build`, not one label per run.
+At most 32 prefixes per repo (then `key_prefix="_other"`) and 256
+label sets overall (then `repo="_other", key_prefix="_other"`) are
+tracked; oxide logs a warning the first time either cap is hit.
+
+**Breaking for existing queries:** these four families used to be
+unlabelled (or `result`-only) and always present at 0. They now carry
+`repo` / `key_prefix` and a series appears on first traffic, so
+aggregate them (`sum(rate(…_upload_bytes_total[5m]))`, hit rate
+`sum by (result)(…_cache_lookups_total)`) and prefer `or vector(0)` over
+`absent()` for idle servers.
+
+buildx / BuildKit `type=gha` cache works over this dialect: without
+`ACTIONS_CACHE_SERVICE_V2`, buildx passes `ACTIONS_CACHE_URL` (the
+runner's cache proxy) and BuildKit speaks v1. The BuildKit container
+must be able to reach the proxy's advertised address (the runner's
+`cache.proxy_host` / outbound IP). `tests/forgejo_e2e/buildkit.sh`
+proves export → fresh-daemon import through the real runner proxy.
 
 Tests: `tests/forgejo.rs` ports act's `handler_test.go`; the manual
 end-to-end harness in [`tests/forgejo_e2e/`](./tests/forgejo_e2e) drives

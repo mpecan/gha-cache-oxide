@@ -87,6 +87,7 @@
 
 mod auth;
 mod handlers;
+mod support;
 
 pub use auth::compute_mac;
 
