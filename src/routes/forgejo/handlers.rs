@@ -20,7 +20,7 @@ use crate::cache::{MAX_STORAGE_PROBES, probe_storage_for_entry, purge_broken_ent
 use crate::db::entities::{CacheEntry, CacheEntryCoord, MatchRequest, NewUpload, Upload};
 use crate::db::id::{new_upload_id, new_uuid, now_ms};
 use crate::merge;
-use crate::metrics::Metrics;
+use crate::metrics::SourceCounters;
 use crate::routes::blob;
 use crate::state::AppState;
 use crate::storage::ByteStream;
@@ -63,7 +63,7 @@ pub(super) async fn find(
     let requested: Vec<&str> = q.keys.split(',').filter(|k| !k.is_empty()).collect();
     let keys: Vec<String> = requested.iter().map(|k| k.to_lowercase()).collect();
     let Some((primary, restore)) = keys.split_first() else {
-        return miss(&state);
+        return miss(&state, &run, "");
     };
     let restore: Vec<&str> = restore.iter().map(String::as_str).collect();
 
@@ -80,12 +80,12 @@ pub(super) async fn find(
             repo_id: &run.repo_id,
         };
         match match_with_healthy_storage(&state, req).await {
-            Ok(Some(entry)) => return hit(&state, &run, &entry, &requested),
+            Ok(Some(entry)) => return hit(&state, &run, &entry, &requested, primary),
             Ok(None) => {}
             Err(resp) => return resp,
         }
     }
-    miss(&state)
+    miss(&state, &run, primary)
 }
 
 /// `cacheKey` for a hit. Keys are stored and matched lowercased (as in
@@ -102,8 +102,22 @@ fn display_key<'a>(entry: &'a CacheEntry, requested: &[&'a str]) -> &'a str {
         .unwrap_or(&entry.key)
 }
 
-fn hit(state: &AppState, run: &ForgejoRun, entry: &CacheEntry, requested: &[&str]) -> Response {
-    state.metrics.forgejo.find_hits.inc();
+/// Lookups are attributed to the primary requested key: that is what the
+/// workflow asked for, whichever entry ends up matching.
+fn hit(
+    state: &AppState,
+    run: &ForgejoRun,
+    entry: &CacheEntry,
+    requested: &[&str],
+    primary: &str,
+) -> Response {
+    state
+        .metrics
+        .forgejo
+        .sources
+        .get(run.repo(), primary)
+        .hits
+        .inc();
     let archive_location = format!(
         "{}/{}{BASE_PATH}/artifacts/{}",
         run.proxy_host, run.run_id, entry.id
@@ -116,8 +130,14 @@ fn hit(state: &AppState, run: &ForgejoRun, entry: &CacheEntry, requested: &[&str
     .into_response()
 }
 
-fn miss(state: &AppState) -> Response {
-    state.metrics.forgejo.find_misses.inc();
+fn miss(state: &AppState, run: &ForgejoRun, primary: &str) -> Response {
+    state
+        .metrics
+        .forgejo
+        .sources
+        .get(run.repo(), primary)
+        .misses
+        .inc();
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -239,9 +259,8 @@ pub(super) async fn upload(
         }
     }
     let object = chunk_object_name(&upload.folder_name, start);
-    let stream = counted(body, Arc::clone(&state.metrics), |m, n| {
-        m.forgejo.upload_bytes.add(n);
-    });
+    let source = state.metrics.forgejo.sources.get(run.repo(), &upload.key);
+    let stream = counted(body, source, |c, n| c.upload_bytes.add(n));
     if let Err(e) = state.storage.upload_stream(&object, stream).await {
         f.upload_errors.inc();
         return internal(&e);
@@ -317,7 +336,7 @@ pub(super) async fn commit(
     .await;
     match result {
         Ok(committed) => {
-            f.commits.inc();
+            f.sources.get(run.repo(), &upload.key).commits.inc();
             tracing::info!(
                 upload_id = upload.id,
                 key = upload.key,
@@ -408,13 +427,13 @@ pub(super) async fn get_artifact(
         return isolation_mismatch(&run, &entry.scope);
     }
 
-    let metrics = Arc::clone(&state.metrics);
+    let source = state.metrics.forgejo.sources.get(run.repo(), &entry.key);
     let resp = blob::download(State(state), Path(entry.id)).await;
     if !resp.status().is_success() {
         return resp;
     }
     let (parts, body) = resp.into_parts();
-    let counted = counted(body, metrics, |m, n| m.forgejo.download_bytes.add(n));
+    let counted = counted(body, source, |c, n| c.download_bytes.add(n));
     Response::from_parts(parts, Body::from_stream(counted))
 }
 
@@ -430,9 +449,13 @@ pub(super) async fn clean() -> Response {
 
 /// Wraps `body` in a stream that reports every chunk's length to
 /// `record` as it passes through.
-fn counted(body: Body, metrics: Arc<Metrics>, record: fn(&Metrics, u64)) -> ByteStream {
+fn counted(
+    body: Body,
+    source: Arc<SourceCounters>,
+    record: fn(&SourceCounters, u64),
+) -> ByteStream {
     body.into_data_stream()
-        .inspect_ok(move |chunk| record(&metrics, chunk.len() as u64))
+        .inspect_ok(move |chunk| record(&source, chunk.len() as u64))
         .map_err(io::Error::other)
         .boxed()
 }

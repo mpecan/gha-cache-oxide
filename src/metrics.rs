@@ -1,8 +1,9 @@
 //! Prometheus counters, served as text exposition format at `/metrics`.
 //!
-//! A handful of monotonic `AtomicU64` counters rendered by hand — no
-//! registry crate, because there are no labels beyond a fixed `result`
-//! split and no histograms. Counters live on [`AppState`] (not in
+//! A handful of monotonic `AtomicU64` counters and one histogram,
+//! rendered by hand — no registry crate. The only open-ended labels are
+//! the Forgejo `{repo, key_prefix}` sources, which are capped (see
+//! [`SourceMetrics`]). Counters live on [`AppState`] (not in
 //! statics) so parallel tests each observe their own.
 //!
 //! Currently instrumented: the Forgejo runner v1 cache dialect
@@ -19,6 +20,9 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 
 use crate::state::AppState;
+
+mod sources;
+pub use sources::{MAX_SOURCES, SourceCounters, SourceMetrics, key_prefix};
 
 /// All counters exported by the process.
 #[derive(Debug, Default)]
@@ -104,18 +108,12 @@ impl Histogram {
 /// Counters for the Forgejo runner v1 cache dialect.
 #[derive(Debug, Default)]
 pub struct ForgejoMetrics {
-    /// `GET /cache` lookups that returned a hit.
-    pub find_hits: Counter,
-    /// `GET /cache` lookups that returned 204 (no entry, or blob gone).
-    pub find_misses: Counter,
-    /// Request-body bytes written to storage by `PATCH /caches/:id`.
-    pub upload_bytes: Counter,
-    /// Response-body bytes streamed by `GET /artifacts/:id`.
-    pub download_bytes: Counter,
+    /// Lookups (hit/miss), bytes up/down and commits, labelled
+    /// `{repo, key_prefix}`. Lookups are attributed to the primary
+    /// requested key; bytes and commits to the entry's key.
+    pub sources: SourceMetrics,
     /// `PATCH /caches/:id` requests that failed after authentication.
     pub upload_errors: Counter,
-    /// `POST /caches/:id` commits that produced a cache entry.
-    pub commits: Counter,
     /// `POST /caches/:id` commits that failed after authentication.
     pub commit_errors: Counter,
     /// Requests rejected with 403 by MAC / timestamp validation.
@@ -145,35 +143,12 @@ impl Metrics {
     pub fn render(&self) -> String {
         let f = &self.forgejo;
         let mut out = String::new();
-        family(
-            &mut out,
-            "gha_cache_oxide_forgejo_cache_lookups_total",
-            "Forgejo v1 cache lookups by result.",
-            &[
-                ("result=\"hit\"", f.find_hits.get()),
-                ("result=\"miss\"", f.find_misses.get()),
-            ],
-        );
+        f.sources.render(&mut out);
         let singles = [
-            (
-                "gha_cache_oxide_forgejo_upload_bytes_total",
-                "Bytes uploaded through the Forgejo v1 dialect.",
-                &f.upload_bytes,
-            ),
-            (
-                "gha_cache_oxide_forgejo_download_bytes_total",
-                "Bytes downloaded through the Forgejo v1 dialect.",
-                &f.download_bytes,
-            ),
             (
                 "gha_cache_oxide_forgejo_upload_errors_total",
                 "Failed Forgejo v1 chunk uploads.",
                 &f.upload_errors,
-            ),
-            (
-                "gha_cache_oxide_forgejo_commits_total",
-                "Committed Forgejo v1 cache entries.",
-                &f.commits,
             ),
             (
                 "gha_cache_oxide_forgejo_commit_errors_total",
@@ -225,14 +200,22 @@ mod tests {
     #[test]
     fn renders_prometheus_text_format() {
         let m = Metrics::default();
-        m.forgejo.find_hits.inc();
-        m.forgejo.find_hits.inc();
-        m.forgejo.upload_bytes.add(1024);
+        let src = m.forgejo.sources.get("o/r", "v0-rust-x");
+        src.hits.inc();
+        src.hits.inc();
+        src.upload_bytes.add(1024);
         let text = m.render();
+        let l = "repo=\"o/r\",key_prefix=\"v0-rust\"";
         assert!(text.contains("# TYPE gha_cache_oxide_forgejo_cache_lookups_total counter\n"));
-        assert!(text.contains("gha_cache_oxide_forgejo_cache_lookups_total{result=\"hit\"} 2\n"));
-        assert!(text.contains("gha_cache_oxide_forgejo_cache_lookups_total{result=\"miss\"} 0\n"));
-        assert!(text.contains("gha_cache_oxide_forgejo_upload_bytes_total 1024\n"));
+        assert!(text.contains(&format!(
+            "gha_cache_oxide_forgejo_cache_lookups_total{{result=\"hit\",{l}}} 2\n"
+        )));
+        assert!(text.contains(&format!(
+            "gha_cache_oxide_forgejo_cache_lookups_total{{result=\"miss\",{l}}} 0\n"
+        )));
+        assert!(text.contains(&format!(
+            "gha_cache_oxide_forgejo_upload_bytes_total{{{l}}} 1024\n"
+        )));
         assert!(text.contains("gha_cache_oxide_forgejo_auth_failures_total 0\n"));
         assert!(text.contains("gha_cache_oxide_merges_total{result=\"ok\"} 0\n"));
         assert!(text.contains("# TYPE gha_cache_oxide_merge_duration_seconds histogram\n"));

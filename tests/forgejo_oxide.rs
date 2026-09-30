@@ -68,9 +68,10 @@ async fn out_of_order_parallel_chunks_reassemble() {
     assert!(again.as_ref() == content.as_slice());
 
     let m = &srv.metrics.forgejo;
-    assert_eq!(m.upload_bytes.get(), content.len() as u64);
-    assert_eq!(m.download_bytes.get(), 2 * content.len() as u64);
-    assert_eq!(m.commits.get(), 1);
+    let t = m.sources.totals();
+    assert_eq!(t.upload_bytes.get(), content.len() as u64);
+    assert_eq!(t.download_bytes.get(), 2 * content.len() as u64);
+    assert_eq!(t.commits.get(), 1);
 }
 
 #[tokio::test]
@@ -240,9 +241,16 @@ async fn lookups_are_counted_and_exported() {
         .text()
         .await
         .unwrap();
-    assert!(text.contains("gha_cache_oxide_forgejo_cache_lookups_total{result=\"hit\"} 1\n"));
-    assert!(text.contains("gha_cache_oxide_forgejo_cache_lookups_total{result=\"miss\"} 1\n"));
-    assert!(text.contains("gha_cache_oxide_forgejo_commits_total 1\n"));
+    let repo = forgejo_common::REPO;
+    assert!(text.contains(&format!(
+        "gha_cache_oxide_forgejo_cache_lookups_total{{result=\"hit\",repo=\"{repo}\",key_prefix=\"counted\"}} 1\n"
+    )));
+    assert!(text.contains(&format!(
+        "gha_cache_oxide_forgejo_cache_lookups_total{{result=\"miss\",repo=\"{repo}\",key_prefix=\"counted-miss\"}} 1\n"
+    )));
+    assert!(text.contains(&format!(
+        "gha_cache_oxide_forgejo_commits_total{{repo=\"{repo}\",key_prefix=\"counted\"}} 1\n"
+    )));
 }
 
 /// Without `FORGEJO_CACHE_SECRET` nothing is mounted: the request falls
@@ -477,4 +485,42 @@ async fn commit_merges_in_the_background_before_first_download() {
         .unwrap();
     assert!(text.contains("gha_cache_oxide_merges_total{result=\"ok\"} 1\n"));
     assert!(text.contains("gha_cache_oxide_merge_duration_seconds_count 1\n"));
+}
+
+/// Lookups, bytes and commits are attributed to the MAC-validated repo
+/// and the key's tool prefix, so misses can be traced to a workflow.
+#[tokio::test]
+async fn metrics_are_attributed_per_repo_and_key_prefix() {
+    let (srv, r) = setup().await;
+    let images = r.with_repo("mpecan/images");
+    let blob = "buildkit-blob-1-sha256:0123456789abcdef";
+    images.upload_normally(blob, VERSION, &[1; 40]).await;
+    assert_eq!(
+        images.find("index-buildkit-1-89abcdef", VERSION).await.0,
+        StatusCode::NO_CONTENT
+    );
+    r.upload_normally("v0-rust-build-Linux-x64-abc", VERSION, &[2; 25])
+        .await;
+
+    let s = &srv.metrics.forgejo.sources;
+    let bk = s.get("mpecan/images", blob);
+    assert_eq!((bk.hits.get(), bk.misses.get()), (1, 0));
+    assert_eq!(bk.upload_bytes.get(), 40);
+    assert_eq!(bk.download_bytes.get(), 40);
+    assert_eq!(bk.commits.get(), 1);
+    assert_eq!(s.get("mpecan/images", "index-buildkit-x").misses.get(), 1);
+    let rust = s.get(forgejo_common::REPO, "v0-rust-anything");
+    assert_eq!((rust.hits.get(), rust.upload_bytes.get()), (1, 25));
+    // Nothing leaks across repos.
+    assert_eq!(s.get(forgejo_common::REPO, blob).hits.get(), 0);
+
+    let text = reqwest::get(format!("{}/metrics", srv.base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(text.contains(
+        "gha_cache_oxide_forgejo_download_bytes_total{repo=\"mpecan/images\",key_prefix=\"buildkit-blob\"} 40\n"
+    ));
 }

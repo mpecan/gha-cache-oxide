@@ -27,3 +27,11 @@ BIG_MB=500 tests/forgejo_e2e/run.sh   # ≈ the largest Rust target caches
 
 Needs cargo, go (`GOTOOLCHAIN=auto` fetches 1.26), node + npm, zstd, and
 podman or docker (`E2E_CONTAINER` overrides which one).
+
+## BuildKit (`type=gha`)
+
+`buildkit.sh` runs real BuildKit (`moby/buildkit`, in a container) with
+`--export-cache/--import-cache type=gha` through the same runner cache
+proxy and oxide on Garage: a cold build exports, a second build on a
+fresh daemon must import (its `RUN` steps report `CACHED`). It prints
+the per-repo / `key_prefix` metrics (`buildkit-blob`, `index-buildkit`).

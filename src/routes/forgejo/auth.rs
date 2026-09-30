@@ -40,6 +40,16 @@ pub(super) struct ForgejoRun {
     pub run_id: String,
 }
 
+impl ForgejoRun {
+    /// The repository (`owner/name`) this run authenticated for, i.e.
+    /// `repo_id` without the storage prefix. Used as a metrics label.
+    pub(super) fn repo(&self) -> &str {
+        self.repo_id
+            .strip_prefix(REPO_ID_PREFIX)
+            .unwrap_or(&self.repo_id)
+    }
+}
+
 /// Computes the hex MAC exactly like act's `ComputeMac`.
 ///
 /// Public so integration tests (and operators debugging a secret mismatch) can
