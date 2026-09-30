@@ -292,14 +292,14 @@ pub async fn body_json(resp: axum::response::Response) -> (StatusCode, Value) {
 /// Read-only `SELECT COUNT(*)` helper running directly against the
 /// `SQLite` pool. Test harness is `SQLite`-only, so `as_sqlite_pool()`
 /// always returns `Some` here.
-pub async fn count(db: &dyn Db, sql: &str) -> i64 {
+pub async fn count(db: &dyn Db, sql: &'static str) -> i64 {
     sqlx::query_scalar(sql)
         .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
         .unwrap()
 }
 
-pub async fn fetch_string(db: &dyn Db, sql: &str) -> String {
+pub async fn fetch_string(db: &dyn Db, sql: &'static str) -> String {
     sqlx::query_scalar(sql)
         .fetch_one(db.as_sqlite_pool().expect("SQLite test harness"))
         .await
@@ -365,14 +365,15 @@ pub async fn seed_cache_entry_with_location_no_storage(
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    let entry_id = fetch_string(
-        &*h.db,
-        &format!(
-            "SELECT id FROM cache_entries WHERE key = '{key}' AND scope = '{scope}' \
-             AND version = 'v1' AND repoId = '42'"
-        ),
+    let entry_id: String = sqlx::query_scalar(
+        "SELECT id FROM cache_entries WHERE key = ? AND scope = ? \
+         AND version = 'v1' AND repoId = '42'",
     )
-    .await;
+    .bind(key)
+    .bind(scope)
+    .fetch_one(h.db.as_sqlite_pool().expect("SQLite test harness"))
+    .await
+    .unwrap();
     (entry_id, location_id)
 }
 
