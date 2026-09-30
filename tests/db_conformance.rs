@@ -86,7 +86,9 @@ impl Drop for SchemaGuard {
             rt.block_on(async move {
                 if let Ok(pool) = PgPoolOptions::new().max_connections(1).connect(&url).await {
                     let _ = pool
-                        .execute(AssertSqlSafe(format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")))
+                        .execute(AssertSqlSafe(format!(
+                            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+                        )))
                         .await;
                     pool.close().await;
                 }
@@ -127,7 +129,9 @@ async fn postgres_setup() -> SetupResult {
         .await
         .unwrap();
     bootstrap
-        .execute(AssertSqlSafe(format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\"")))
+        .execute(AssertSqlSafe(format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{schema}\""
+        )))
         .await
         .unwrap();
     bootstrap.close().await;
@@ -229,7 +233,9 @@ impl Drop for MysqlDbGuard {
                     .await
                 {
                     let _ = pool
-                        .execute(AssertSqlSafe(format!("DROP DATABASE IF EXISTS `{database}`")))
+                        .execute(AssertSqlSafe(format!(
+                            "DROP DATABASE IF EXISTS `{database}`"
+                        )))
                         .await;
                     pool.close().await;
                 }
