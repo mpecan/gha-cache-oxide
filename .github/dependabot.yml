@@ -42,7 +42,7 @@ updates:
           - patch
 
   # Dockerfile base images, pinned as literal `tag@digest`:
-  # `rust:1.93.0-alpine3.20@sha256:…` and the distroless runtime
+  # `rust:1.98.1-alpine3.22@sha256:…` and the distroless runtime
   # (`gcr.io/distroless/static-debian13:nonroot@sha256:…`). Dependabot
   # bumps the digest (and tag) of each `FROM` line.
   #

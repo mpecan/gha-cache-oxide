@@ -61,7 +61,7 @@ const KEY_PREFIX: &str = "gh-actions-cache";
 
 /// Signed-download-URL TTL. Upstream: `10 * 60 * 1000` ms in
 /// `lib/storage.ts#GcsAdapter::createDownloadUrl`.
-const SIGNED_URL_TTL: Duration = Duration::from_secs(10 * 60);
+const SIGNED_URL_TTL: Duration = Duration::from_mins(10);
 
 /// Inputs for constructing [`GcsAdapter`]. Typically built from
 /// `crate::config::StorageConfig::Gcs`, but tests can populate it directly.

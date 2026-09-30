@@ -21,8 +21,8 @@
 # no ARG interpolation — so Dependabot can bump tag and digest together
 # and a tag edit can never silently build against a stale digest.
 #
-# Builder tag matches `rust-toolchain.toml` (1.93.0).
-FROM rust:1.93.0-alpine3.20@sha256:66e45ca090b7d2424b1ab4366d308ebff31906a36309bd097dacdc2e531cd9c3 AS builder
+# Builder tag matches `rust-toolchain.toml` (1.98.1).
+FROM rust:1.98.1-alpine3.22@sha256:a1796ca6fa216d6727b5f61c69e4c665b120b1a4dcb969639e2f25f1ed309456 AS builder
 
 # musl-dev is the toolchain — the `rust:alpine` image already targets
 # x86_64-unknown-linux-musl, but the C runtime headers aren't on the

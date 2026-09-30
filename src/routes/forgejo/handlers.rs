@@ -142,6 +142,11 @@ fn miss(state: &AppState, run: &ForgejoRun, primary: &str) -> Response {
 /// (`handler.go#find`). Like the v2 download path (#72) it then retries
 /// the next-best candidate instead of reporting a miss straight away,
 /// capped at [`MAX_STORAGE_PROBES`].
+// Returns the early-exit HTTP response as the error, like
+// `twirp::parse_body`: `Response` is ~128 bytes, trips
+// `result_large_err`, and boxing it would add an allocation per request
+// for nothing.
+#[allow(clippy::result_large_err)]
 async fn match_with_healthy_storage(
     state: &AppState,
     req: MatchRequest<'_>,
@@ -378,6 +383,11 @@ fn spawn_merge_after_commit(state: &AppState, location_id: String) {
 /// act's `readCache` + write-isolation check for `caches/:id`.
 /// A malformed id is 400, an unknown (or foreign-repo) id 404, and an
 /// isolation-key mismatch 403.
+// Returns the early-exit HTTP response as the error, like
+// `twirp::parse_body`: `Response` is ~128 bytes, trips
+// `result_large_err`, and boxing it would add an allocation per request
+// for nothing.
+#[allow(clippy::result_large_err)]
 async fn load_upload(state: &AppState, run: &ForgejoRun, id: &str) -> Result<Upload, Response> {
     let Ok(id) = id.parse::<i64>() else {
         return Err(json_error(

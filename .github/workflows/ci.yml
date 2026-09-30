@@ -1,6 +1,6 @@
 # Issue #46 — the gate CLAUDE.md mandates pre-commit, lifted into Actions.
 # Four parallel jobs (fmt / clippy / doc / test). Toolchain version is read
-# from `rust-toolchain.toml` (1.93.0) by `actions-rust-lang/setup-rust-toolchain`.
+# from `rust-toolchain.toml` (1.98.1) by `actions-rust-lang/setup-rust-toolchain`.
 #
 # Issue #47 — two further jobs run the `#[ignore]`-gated conformance suites
 # against real backends (Postgres, MySQL, Garage, fake-gcs-server).
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # `setup-rust-toolchain` reads `rust-toolchain.toml` natively — single
-      # source of truth for the pinned 1.93.0 toolchain + rustfmt + clippy.
+      # source of truth for the pinned 1.98.1 toolchain + rustfmt + clippy.
       # `rustflags: ""` overrides the action's `-D warnings` default; we set
       # it explicitly per job (clippy/doc) so the gate is never silent.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
