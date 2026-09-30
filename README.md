@@ -197,10 +197,19 @@ first `-`-segment, plus the second if it is purely alphabetic, so
 `v0-rust-…` → `v0-rust`, `node-cache-…` → `node-cache`, BuildKit's
 `buildkit-blob-…` / `index-buildkit-…` → `buildkit-blob` /
 `index-buildkit`. Lookups are attributed to the primary requested key;
-bytes and commits to the entry's key. At most 256 `{repo, key_prefix}`
-sets are tracked; further ones are counted under `repo="_other",
-key_prefix="_other"`. Aggregate with `sum by (result)` for the overall
-hit rate.
+bytes and commits to the entry's key. Segments that look like data
+collapse (`_num` for digits, `_hash` for 7+ hex / letters-and-digits),
+so `${{ github.sha }}-build` is `_hash-build`, not one label per run.
+At most 32 prefixes per repo (then `key_prefix="_other"`) and 256
+label sets overall (then `repo="_other", key_prefix="_other"`) are
+tracked; oxide logs a warning the first time either cap is hit.
+
+**Breaking for existing queries:** these four families used to be
+unlabelled (or `result`-only) and always present at 0. They now carry
+`repo` / `key_prefix` and a series appears on first traffic, so
+aggregate them (`sum(rate(…_upload_bytes_total[5m]))`, hit rate
+`sum by (result)(…_cache_lookups_total)`) and prefer `or vector(0)` over
+`absent()` for idle servers.
 
 buildx / BuildKit `type=gha` cache works over this dialect: without
 `ACTIONS_CACHE_SERVICE_V2`, buildx passes `ACTIONS_CACHE_URL` (the

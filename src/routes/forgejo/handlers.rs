@@ -2,28 +2,25 @@
 //! `artifactcache/handler.go`; see the module docs in `mod.rs` for the
 //! model mapping and the deliberate deviations.
 
-use std::io;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use futures::{StreamExt, TryStreamExt};
 use serde::Deserialize;
 use serde_json::json;
 
 use super::auth::ForgejoRun;
+use super::support::{counted, internal, isolation_mismatch, not_reserved, parse_content_range};
 use super::{BASE_PATH, json_empty, json_error};
 use crate::cache::chunked::{ChunkedCommitError, chunk_object_name, complete_chunked_upload};
 use crate::cache::{MAX_STORAGE_PROBES, probe_storage_for_entry, purge_broken_entry};
 use crate::db::entities::{CacheEntry, CacheEntryCoord, MatchRequest, NewUpload, Upload};
 use crate::db::id::{new_upload_id, new_uuid, now_ms};
 use crate::merge;
-use crate::metrics::SourceCounters;
 use crate::routes::blob;
 use crate::state::AppState;
-use crate::storage::ByteStream;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct FindQuery {
@@ -287,15 +284,6 @@ async fn late_chunk(state: &AppState, upload: &Upload) -> Response {
     not_reserved(upload.id)
 }
 
-/// Parses act's supported `Content-Range` shape, `bytes <start>-<end>/*`
-/// (the total may be anything, and is ignored).
-pub(super) fn parse_content_range(s: &str) -> Option<(u64, u64)> {
-    let s = s.strip_prefix("bytes ").unwrap_or(s);
-    let range = s.split_once('/').map_or(s, |(r, _)| r);
-    let (a, b) = range.split_once('-')?;
-    Some((a.parse().ok()?, b.parse().ok()?))
-}
-
 // -- POST /caches/:id ------------------------------------------------------
 
 /// Commits the upload.
@@ -427,11 +415,12 @@ pub(super) async fn get_artifact(
         return isolation_mismatch(&run, &entry.scope);
     }
 
-    let source = state.metrics.forgejo.sources.get(run.repo(), &entry.key);
-    let resp = blob::download(State(state), Path(entry.id)).await;
+    let metrics = Arc::clone(&state.metrics);
+    let resp = blob::download(State(state), Path(entry.id.clone())).await;
     if !resp.status().is_success() {
         return resp;
     }
+    let source = metrics.forgejo.sources.get(run.repo(), &entry.key);
     let (parts, body) = resp.into_parts();
     let counted = counted(body, source, |c, n| c.download_bytes.add(n));
     Response::from_parts(parts, Body::from_stream(counted))
@@ -443,64 +432,4 @@ pub(super) async fn get_artifact(
 /// supported over this API); so do we.
 pub(super) async fn clean() -> Response {
     json_empty()
-}
-
-// -- helpers ---------------------------------------------------------------
-
-/// Wraps `body` in a stream that reports every chunk's length to
-/// `record` as it passes through.
-fn counted(
-    body: Body,
-    source: Arc<SourceCounters>,
-    record: fn(&SourceCounters, u64),
-) -> ByteStream {
-    body.into_data_stream()
-        .inspect_ok(move |chunk| record(&source, chunk.len() as u64))
-        .map_err(io::Error::other)
-        .boxed()
-}
-
-fn not_reserved(id: impl std::fmt::Display) -> Response {
-    json_error(StatusCode::NOT_FOUND, &format!("cache {id}: not reserved"))
-}
-
-fn isolation_mismatch(run: &ForgejoRun, entry_scope: &str) -> Response {
-    json_error(
-        StatusCode::FORBIDDEN,
-        &format!(
-            "cache authorized for write isolation {:?}, but attempting to operate on {entry_scope:?}",
-            run.write_isolation_key
-        ),
-    )
-}
-
-fn internal(e: &dyn std::fmt::Display) -> Response {
-    tracing::error!(error = %e, "forgejo cache: internal error");
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_content_range;
-
-    #[test]
-    fn parses_act_content_range_shapes() {
-        assert_eq!(parse_content_range("bytes 0-99/*"), Some((0, 99)));
-        assert_eq!(parse_content_range("bytes 100-199/200"), Some((100, 199)));
-        assert_eq!(parse_content_range("bytes 5-9"), Some((5, 9)));
-    }
-
-    #[test]
-    fn rejects_malformed_content_range() {
-        for s in [
-            "",
-            "bytes",
-            "bytes -1/*",
-            "bytes a-b/*",
-            "bytes 0-/*",
-            "bytes 1/*",
-        ] {
-            assert_eq!(parse_content_range(s), None, "{s:?}");
-        }
-    }
 }
