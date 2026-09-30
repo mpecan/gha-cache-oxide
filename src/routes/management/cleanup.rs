@@ -22,8 +22,8 @@ use crate::tasks::cleanup::CleanupReport;
     description = "Runs the same cleanup pass the background scheduler runs on its cadence; returns the per-task counts.",
     responses(
         (status = 200, description = "Per-task cleanup counts", body = CleanupReport),
-        (status = 401, body = ErrorBody),
-        (status = 501, body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 501, description = "Management API disabled (MANAGEMENT_API_KEY is not set)", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]

@@ -48,8 +48,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2"
 orpc-server = { path = "crates/orpc-server" }
-utoipa = { version = "5", features = ["axum_extras", "url"] }
-utoipa-axum = "0.2"
+utoipa = { version = "6", features = ["axum_extras", "url"] }
+utoipa-axum = "0.3"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

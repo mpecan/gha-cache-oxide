@@ -50,8 +50,8 @@ pub(super) struct ListBody {
     params(ListQuery),
     responses(
         (status = 200, description = "Page of cache entries", body = ListBody),
-        (status = 401, body = ErrorBody),
-        (status = 501, body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 501, description = "Management API disabled (MANAGEMENT_API_KEY is not set)", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
@@ -118,9 +118,9 @@ pub(super) async fn list(
     params(("id" = String, Path, description = "Cache entry id")),
     responses(
         (status = 204, description = "Deleted"),
-        (status = 401, body = ErrorBody),
-        (status = 404, body = ErrorBody),
-        (status = 501, body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 404, description = "Not found", body = ErrorBody),
+        (status = 501, description = "Management API disabled (MANAGEMENT_API_KEY is not set)", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
@@ -182,9 +182,9 @@ pub(super) async fn delete(State(state): State<AppState>, Path(id): Path<String>
     params(("id" = String, Path, description = "Cache entry id")),
     responses(
         (status = 200, description = "The cache entry", body = CacheEntry),
-        (status = 401, body = ErrorBody),
-        (status = 404, body = ErrorBody),
-        (status = 501, body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 404, description = "Not found", body = ErrorBody),
+        (status = 501, description = "Management API disabled (MANAGEMENT_API_KEY is not set)", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
@@ -238,10 +238,10 @@ pub(super) struct MatchResponse {
     ),
     responses(
         (status = 200, description = "Best match", body = MatchResponse),
-        (status = 400, body = ErrorBody),
-        (status = 401, body = ErrorBody),
+        (status = 400, description = "Invalid request parameters", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "No matching cache entry", body = ErrorBody),
-        (status = 501, body = ErrorBody),
+        (status = 501, description = "Management API disabled (MANAGEMENT_API_KEY is not set)", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
@@ -387,8 +387,8 @@ pub(super) struct DeleteManyResponse {
     responses(
         (status = 200, description = "Number of rows deleted", body = DeleteManyResponse),
         (status = 400, description = "All filters were unset", body = ErrorBody),
-        (status = 401, body = ErrorBody),
-        (status = 501, body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 501, description = "Management API disabled (MANAGEMENT_API_KEY is not set)", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]

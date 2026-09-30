@@ -77,9 +77,9 @@ pub(super) async fn list(
     params(("id" = String, Path, description = "Storage location id")),
     responses(
         (status = 200, description = "The storage location", body = StorageLocation),
-        (status = 401, body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "No row matched", body = ErrorBody),
-        (status = 501, body = ErrorBody),
+        (status = 501, description = "Management API disabled (MANAGEMENT_API_KEY is not set)", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
@@ -114,9 +114,9 @@ pub(super) async fn get_one(State(state): State<AppState>, Path(id): Path<String
     params(("id" = String, Path, description = "Storage location id")),
     responses(
         (status = 204, description = "Deleted"),
-        (status = 401, body = ErrorBody),
-        (status = 404, body = ErrorBody),
-        (status = 501, body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 404, description = "Not found", body = ErrorBody),
+        (status = 501, description = "Management API disabled (MANAGEMENT_API_KEY is not set)", body = ErrorBody),
     ),
     security(("bearer" = []))
 )]
