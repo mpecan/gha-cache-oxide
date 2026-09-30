@@ -5,7 +5,14 @@
 //! disabled-by-default mount. Failure paths and cleanup interaction
 //! live in `tests/forgejo_failures.rs`.
 
-#![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
+// `manual_assert_eq`: byte-equality checks on multi-MiB payloads use
+// `assert!(a == b)` on purpose — `assert_eq!` would print both buffers.
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::expect_used,
+    clippy::manual_assert_eq
+)]
 
 mod forgejo_common;
 

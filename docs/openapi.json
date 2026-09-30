@@ -308,7 +308,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Missing or invalid bearer token"
           },
           "501": {
             "content": {
@@ -318,7 +318,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Management API disabled (MANAGEMENT_API_KEY is not set)"
           }
         },
         "security": [
@@ -394,7 +394,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Missing or invalid bearer token"
           },
           "501": {
             "content": {
@@ -404,7 +404,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Management API disabled (MANAGEMENT_API_KEY is not set)"
           }
         },
         "security": [
@@ -494,7 +494,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Invalid request parameters"
           },
           "401": {
             "content": {
@@ -504,7 +504,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Missing or invalid bearer token"
           },
           "404": {
             "content": {
@@ -524,7 +524,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Management API disabled (MANAGEMENT_API_KEY is not set)"
           }
         },
         "security": [
@@ -565,7 +565,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Missing or invalid bearer token"
           },
           "404": {
             "content": {
@@ -575,7 +575,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Not found"
           },
           "501": {
             "content": {
@@ -585,7 +585,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Management API disabled (MANAGEMENT_API_KEY is not set)"
           }
         },
         "security": [
@@ -631,7 +631,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Missing or invalid bearer token"
           },
           "404": {
             "content": {
@@ -641,7 +641,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Not found"
           },
           "501": {
             "content": {
@@ -651,7 +651,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Management API disabled (MANAGEMENT_API_KEY is not set)"
           }
         },
         "security": [
@@ -688,7 +688,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Missing or invalid bearer token"
           },
           "501": {
             "content": {
@@ -698,7 +698,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Management API disabled (MANAGEMENT_API_KEY is not set)"
           }
         },
         "security": [
@@ -810,7 +810,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Missing or invalid bearer token"
           },
           "404": {
             "content": {
@@ -820,7 +820,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Not found"
           },
           "501": {
             "content": {
@@ -830,7 +830,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Management API disabled (MANAGEMENT_API_KEY is not set)"
           }
         },
         "security": [
@@ -875,7 +875,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Missing or invalid bearer token"
           },
           "404": {
             "content": {
@@ -895,7 +895,7 @@
                 }
               }
             },
-            "description": ""
+            "description": "Management API disabled (MANAGEMENT_API_KEY is not set)"
           }
         },
         "security": [

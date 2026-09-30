@@ -4,7 +4,7 @@
 //! a 10-digit decimal integer — mirror of upstream `generateNumberId`
 //! (`nanoid('0123456789', 10)` in `lib/helpers.ts`).
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Returns a new UUID v4 as a lowercase hyphenated string.
 #[must_use]

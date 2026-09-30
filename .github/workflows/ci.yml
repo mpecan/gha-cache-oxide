@@ -1,6 +1,6 @@
 # Issue #46 — the gate CLAUDE.md mandates pre-commit, lifted into Actions.
 # Four parallel jobs (fmt / clippy / doc / test). Toolchain version is read
-# from `rust-toolchain.toml` (1.93.0) by `actions-rust-lang/setup-rust-toolchain`.
+# from `rust-toolchain.toml` (1.98.1) by `actions-rust-lang/setup-rust-toolchain`.
 #
 # Issue #47 — two further jobs run the `#[ignore]`-gated conformance suites
 # against real backends (Postgres, MySQL, Garage, fake-gcs-server).
@@ -29,24 +29,25 @@ jobs:
     name: cargo fmt --check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # `setup-rust-toolchain` reads `rust-toolchain.toml` natively — single
-      # source of truth for the pinned 1.93.0 toolchain + rustfmt + clippy.
-      # `rustflags: ""` overrides the action's `-D warnings` default; we set
-      # it explicitly per job (clippy/doc) so the gate is never silent.
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # source of truth for the pinned 1.98.1 toolchain + rustfmt + clippy.
+      # `build-warnings: warn` overrides the action's `deny` default (v2 sets
+      # cargo's `build.warnings`); warnings are gated explicitly per job
+      # (clippy/doc) instead, so the gate is never silent.
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
       - run: cargo fmt --all -- --check
 
   clippy:
     name: cargo clippy -D warnings
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
       # Caches `target/` + cargo registry, keyed on Cargo.lock + toolchain.
       # `shared-key` collapses the action's default per-job-name slot so
       # all five compiling jobs reuse the same dep-build artifacts —
@@ -66,10 +67,10 @@ jobs:
       # would cause an unrelated full rebuild.
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-build
@@ -79,10 +80,10 @@ jobs:
     name: cargo test --locked
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-build
@@ -119,10 +120,10 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-build
@@ -159,10 +160,10 @@ jobs:
           --health-timeout 3s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-build
@@ -184,10 +185,10 @@ jobs:
     env:
       GARAGE_IMAGE: docker.io/dxflrs/garage:v2.1.0
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-build
@@ -226,10 +227,10 @@ jobs:
     env:
       FAKE_GCS_IMAGE: tustvold/fake-gcs-server@sha256:dcd3aeacc07c731f1336e90c2889be2af8626ae993ee1fe2c0ba042ebbeb5a04
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-build

@@ -55,7 +55,7 @@ const KEY_PREFIX: &str = "gh-actions-cache";
 
 /// Signed-download-URL TTL. Upstream: `10 * 60 * 1000` ms in
 /// `lib/storage.ts#createDownloadUrl`.
-const SIGNED_URL_TTL: Duration = Duration::from_secs(10 * 60);
+const SIGNED_URL_TTL: Duration = Duration::from_mins(10);
 
 /// Inputs for constructing [`S3Adapter`]. Typically built from
 /// `crate::config::StorageConfig::S3`, but tests can populate it directly.

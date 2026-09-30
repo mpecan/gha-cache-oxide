@@ -43,6 +43,9 @@
 
 use std::sync::Arc;
 
+// Test-only DDL whose identifiers are generated per run (never user input).
+use sqlx::AssertSqlSafe;
+
 use gha_cache_oxide::db::{Db, MysqlDb, PostgresDb, SqliteDb};
 
 // ------------------------------------------------------------------------
@@ -83,7 +86,9 @@ impl Drop for SchemaGuard {
             rt.block_on(async move {
                 if let Ok(pool) = PgPoolOptions::new().max_connections(1).connect(&url).await {
                     let _ = pool
-                        .execute(format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE").as_str())
+                        .execute(AssertSqlSafe(format!(
+                            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+                        )))
                         .await;
                     pool.close().await;
                 }
@@ -124,7 +129,9 @@ async fn postgres_setup() -> SetupResult {
         .await
         .unwrap();
     bootstrap
-        .execute(format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\"").as_str())
+        .execute(AssertSqlSafe(format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{schema}\""
+        )))
         .await
         .unwrap();
     bootstrap.close().await;
@@ -179,7 +186,7 @@ async fn mysql_setup() -> SetupResult {
         .await
         .unwrap();
     bootstrap
-        .execute(format!("CREATE DATABASE `{database}`").as_str())
+        .execute(AssertSqlSafe(format!("CREATE DATABASE `{database}`")))
         .await
         .unwrap();
     bootstrap.close().await;
@@ -226,7 +233,9 @@ impl Drop for MysqlDbGuard {
                     .await
                 {
                     let _ = pool
-                        .execute(format!("DROP DATABASE IF EXISTS `{database}`").as_str())
+                        .execute(AssertSqlSafe(format!(
+                            "DROP DATABASE IF EXISTS `{database}`"
+                        )))
                         .await;
                     pool.close().await;
                 }

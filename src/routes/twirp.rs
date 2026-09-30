@@ -374,7 +374,7 @@ fn find_write_scope(scope: &CacheScope) -> Option<&str> {
 /// `GetCacheEntryDownloadURL`. Equal permissions retain input order.
 fn scopes_by_permission_desc(scopes: &[ScopeEntry]) -> Vec<String> {
     let mut out: Vec<&ScopeEntry> = scopes.iter().collect();
-    out.sort_by(|a, b| b.permission.cmp(&a.permission));
+    out.sort_by_key(|s| std::cmp::Reverse(s.permission));
     out.into_iter().map(|s| s.scope.clone()).collect()
 }
 
