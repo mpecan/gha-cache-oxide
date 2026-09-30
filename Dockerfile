@@ -30,6 +30,24 @@ FROM rust:1.98.1-alpine3.22@sha256:a1796ca6fa216d6727b5f61c69e4c665b120b1a4dcb96
 # build immune to future deps that bring in `cc`).
 RUN apk add --no-cache musl-dev
 
+# sccache, used by the release build below only when CI hands it S3
+# credentials (see the build step). A static musl binary, checksum-pinned.
+# Its own layer before the COPYs, so source changes don't re-download it.
+ARG SCCACHE_VERSION=0.18.0
+RUN set -eu; \
+    case "$(uname -m)" in \
+      x86_64)  arch=x86_64;  sum=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 ;; \
+      aarch64) arch=aarch64; sum=2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a ;; \
+      *) echo "no sccache build for $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    name="sccache-v${SCCACHE_VERSION}-${arch}-unknown-linux-musl"; \
+    wget -qO /tmp/sccache.tgz "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${name}.tar.gz"; \
+    echo "${sum}  /tmp/sccache.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/sccache.tgz -C /tmp; \
+    install -m 0755 "/tmp/${name}/sccache" /usr/local/bin/sccache; \
+    rm -rf /tmp/sccache.tgz "/tmp/${name}"; \
+    sccache --version
+
 WORKDIR /build
 
 # Manifests + source. `clippy.toml` is harmless (lint-only) but copying
@@ -48,9 +66,42 @@ COPY benches ./benches
 # `Cargo.toml` must be present even for a bin-only build.
 COPY crates ./crates
 
+# Optional sccache backed by S3. BuildKit cache mounts are never exported
+# (a CI build starts with an empty `target/`), so without it every CI build
+# recompiles every crate. It turns on only when both credentials arrive as
+# BuildKit secrets AND SCCACHE_BUCKET is set:
+#
+#   docker buildx build \
+#     --secret id=aws_access_key_id,env=AWS_ACCESS_KEY_ID \
+#     --secret id=aws_secret_access_key,env=AWS_SECRET_ACCESS_KEY \
+#     --build-arg SCCACHE_BUCKET=... --build-arg SCCACHE_ENDPOINT=... .
+#
+# Secrets never reach a layer or the cache key. A plain `docker build`
+# passes neither, so it builds exactly as before. If the cache server cannot
+# start, or S3 fails mid-build, the build falls back to plain rustc
+# (SCCACHE_IGNORE_SERVER_IO_ERROR).
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_ENDPOINT=""
+ARG SCCACHE_REGION=""
+ARG SCCACHE_S3_USE_SSL=""
+ARG SCCACHE_S3_KEY_PREFIX=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release --locked --bin gha-cache-oxide && \
+    --mount=type=secret,id=aws_access_key_id \
+    --mount=type=secret,id=aws_secret_access_key \
+    set -eu; \
+    if [ -n "$SCCACHE_BUCKET" ] && [ -s /run/secrets/aws_access_key_id ] && [ -s /run/secrets/aws_secret_access_key ]; then \
+      AWS_ACCESS_KEY_ID="$(cat /run/secrets/aws_access_key_id)"; \
+      AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/aws_secret_access_key)"; \
+      export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SCCACHE_IGNORE_SERVER_IO_ERROR=1; \
+      for v in SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL SCCACHE_S3_KEY_PREFIX; do \
+        eval "[ -n \"\${$v}\" ]" || unset "$v"; \
+      done; \
+      if sccache --start-server; then export RUSTC_WRAPPER=sccache; \
+      else echo "sccache did not start; building without it"; fi; \
+    fi; \
+    cargo build --release --locked --bin gha-cache-oxide; \
+    if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --stop-server > /dev/null; fi; \
     cp target/release/gha-cache-oxide /tmp/gha-cache-oxide
 
 # Pre-seed the volume mount point so it inherits non-root ownership
