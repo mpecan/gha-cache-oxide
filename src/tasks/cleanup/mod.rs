@@ -19,6 +19,9 @@
 //! | daily    | 24 h    | `cleanup:cache-entries`,          | `0 0 * * *`   |
 //! |          |         | `cleanup:storage-locations`       |               |
 //!
+//! `cleanup:repo-size` (not in upstream) runs on the hourly cadence,
+//! after parts and merges, when `CACHE_MAX_REPO_SIZE_GB` is set.
+//!
 //! Defaults match upstream cron exactly. Operators can override each
 //! cadence via `CLEANUP_{UPLOADS,HOURLY,DAILY}_SCHEDULE` env vars
 //! (5-field upstream syntax or 6-field with explicit seconds). The
@@ -43,6 +46,7 @@ pub(crate) mod entries;
 pub(crate) mod locations;
 pub(crate) mod merges;
 pub(crate) mod parts;
+pub(crate) mod repo_size;
 mod scheduler;
 #[cfg(test)]
 mod test_utils;
@@ -66,6 +70,8 @@ pub struct CleanupReport {
     pub parts_deleted: u64,
     pub entries_deleted: u64,
     pub locations_deleted: u64,
+    /// Entries `cleanup:repo-size` deleted to fit `CACHE_MAX_REPO_SIZE_GB`.
+    pub repo_size_deleted: u64,
 }
 
 /// Runs every cleanup task in sequence against `db` + `storage`. Used
@@ -86,12 +92,14 @@ pub async fn run_all(
     let parts_deleted = parts::run(db, storage, now_ms).await;
     let entries_deleted = entries::run(db, storage, now_ms, retention).await;
     let locations_deleted = locations::run(db, storage).await;
+    let repo_size_deleted = repo_size::run(db, storage, retention.max_repo_size_gb).await;
     CleanupReport {
         merges_reset,
         uploads_deleted,
         parts_deleted,
         entries_deleted,
         locations_deleted,
+        repo_size_deleted,
     }
 }
 
@@ -267,6 +275,7 @@ mod tests {
             super::EntryRetention {
                 older_than_days: 1,
                 unused_older_than_days: None,
+                max_repo_size_gb: None,
             },
         )
         .await;
@@ -279,6 +288,7 @@ mod tests {
                 parts_deleted: 7,
                 entries_deleted: 1,
                 locations_deleted: 1,
+                repo_size_deleted: 0,
             }
         );
 

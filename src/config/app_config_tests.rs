@@ -17,6 +17,7 @@ fn minimal_env() -> Vec<(&'static str, Option<&'static str>)> {
         ("LOG_FORMAT", None),
         ("CACHE_CLEANUP_OLDER_THAN_DAYS", None),
         ("CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS", None),
+        ("CACHE_MAX_REPO_SIZE_GB", None),
         ("DISABLE_CLEANUP_JOBS", None),
         ("CLEANUP_UPLOADS_SCHEDULE", None),
         ("CLEANUP_HOURLY_SCHEDULE", None),
@@ -201,6 +202,42 @@ fn cache_cleanup_unused_days_rejects_zero_and_garbage() {
                     err,
                     ConfigError::Invalid {
                         var: "CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+        });
+    }
+}
+
+#[test]
+fn cache_max_repo_size_is_off_by_default_and_parses_custom() {
+    with_env(&minimal_env(), || {
+        assert_eq!(AppConfig::from_env().unwrap().cache_max_repo_size_gb, None);
+    });
+    let mut setup = minimal_env();
+    set(&mut setup, "CACHE_MAX_REPO_SIZE_GB", Some("10"));
+    with_env(&setup, || {
+        assert_eq!(
+            AppConfig::from_env().unwrap().cache_max_repo_size_gb,
+            Some(10)
+        );
+    });
+}
+
+#[test]
+fn cache_max_repo_size_rejects_zero_and_garbage() {
+    for bad in ["0", "10GiB", "-1"] {
+        let mut setup = minimal_env();
+        set(&mut setup, "CACHE_MAX_REPO_SIZE_GB", Some(bad));
+        with_env(&setup, || {
+            let err = AppConfig::from_env().unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "CACHE_MAX_REPO_SIZE_GB",
                         ..
                     }
                 ),

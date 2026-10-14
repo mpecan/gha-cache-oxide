@@ -13,10 +13,12 @@
 mod cleanup;
 mod management;
 mod recovery;
+mod size;
 mod uploads;
 pub use cleanup::*;
 pub use management::*;
 pub use recovery::*;
+pub use size::*;
 pub use uploads::*;
 
 use gha_cache_oxide::db::Db;

@@ -41,6 +41,7 @@ async fn cleanup_trigger_runs_pass_and_returns_report() {
         "parts_deleted",
         "entries_deleted",
         "locations_deleted",
+        "repo_size_deleted",
     ] {
         assert!(body.get(k).is_some(), "expected {k} in response: {body}");
     }

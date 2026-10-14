@@ -6,9 +6,10 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::storage::{ByteStream, StorageAdapter, StorageError};
+use crate::storage::{ByteStream, ObjectInfo, StorageAdapter, StorageError};
 
 #[derive(Clone, Default)]
 pub(super) struct FakeStorage {
@@ -19,6 +20,7 @@ pub(super) struct FakeStorage {
 struct Inner {
     deleted: Vec<String>,
     next_delete_fails: bool,
+    folders: HashMap<String, Vec<ObjectInfo>>,
 }
 
 impl FakeStorage {
@@ -32,6 +34,22 @@ impl FakeStorage {
 
     pub(super) fn fail_next_delete(&self) {
         self.inner.lock().unwrap().next_delete_fails = true;
+    }
+
+    /// Makes `list_folder(folder)` return objects of these `(name, size)`.
+    pub(super) fn put_folder(&self, folder: &str, objects: &[(&str, u64)]) {
+        let objects = objects
+            .iter()
+            .map(|(name, size)| ObjectInfo {
+                name: (*name).to_string(),
+                size: *size,
+            })
+            .collect();
+        self.inner
+            .lock()
+            .unwrap()
+            .folders
+            .insert(folder.to_string(), objects);
     }
 }
 
@@ -71,11 +89,9 @@ impl StorageAdapter for FakeStorage {
         Ok(0)
     }
 
-    async fn list_folder(
-        &self,
-        _folder_name: &str,
-    ) -> Result<Vec<crate::storage::ObjectInfo>, StorageError> {
-        Ok(Vec::new())
+    async fn list_folder(&self, folder_name: &str) -> Result<Vec<ObjectInfo>, StorageError> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner.folders.get(folder_name).cloned().unwrap_or_default())
     }
 
     async fn copy(&self, from: &str, _to: &str) -> Result<(), StorageError> {

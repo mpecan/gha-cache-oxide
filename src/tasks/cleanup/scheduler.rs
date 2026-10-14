@@ -6,7 +6,7 @@
 //!
 //! - [`CleanupSchedules::uploads`] runs `cleanup:uploads`.
 //! - [`CleanupSchedules::hourly`] runs `cleanup:merges` then
-//!   `cleanup:parts`.
+//!   `cleanup:parts`, then `cleanup:repo-size` when a cap is set.
 //! - [`CleanupSchedules::daily`] runs `cleanup:cache-entries` then
 //!   `cleanup:storage-locations`.
 //!
@@ -33,7 +33,7 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{entries, locations, merges, parts, uploads};
+use super::{entries, locations, merges, parts, repo_size, uploads};
 use crate::db::Db;
 use crate::db::id::now_ms;
 use crate::storage::StorageAdapter;
@@ -174,6 +174,7 @@ pub fn spawn_schedulers(spawn: SchedulerSpawn, shutdown: CancellationToken) -> S
     let hourly = spawn_hourly(
         db.clone(),
         storage.clone(),
+        retention,
         schedules.hourly,
         shutdown.clone(),
     );
@@ -206,6 +207,7 @@ pub fn maybe_spawn(
         daily = ?spawn.schedules.daily,
         cache_cleanup_older_than_days = spawn.retention.older_than_days,
         cache_cleanup_unused_older_than_days = ?spawn.retention.unused_older_than_days,
+        cache_max_repo_size_gb = ?spawn.retention.max_repo_size_gb,
         "cleanup schedulers starting (uploads/hourly/daily)",
     );
     Some(spawn_schedulers(spawn, shutdown))
@@ -227,13 +229,14 @@ fn spawn_uploads(
 fn spawn_hourly(
     db: Arc<dyn Db>,
     storage: Arc<dyn StorageAdapter>,
+    retention: super::EntryRetention,
     schedule: Schedule,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
     spawn_cadence("hourly", schedule, shutdown, move || {
         let db = db.clone();
         let storage = storage.clone();
-        async move { run_hourly_cycle(db, storage).await }
+        async move { run_hourly_cycle(db, storage, retention).await }
     })
 }
 
@@ -288,7 +291,11 @@ async fn run_uploads_cycle(db: Arc<dyn Db>, storage: Arc<dyn StorageAdapter>) {
     tracing::info!(deleted, "cleanup:uploads cycle complete");
 }
 
-async fn run_hourly_cycle(db: Arc<dyn Db>, storage: Arc<dyn StorageAdapter>) {
+async fn run_hourly_cycle(
+    db: Arc<dyn Db>,
+    storage: Arc<dyn StorageAdapter>,
+    retention: super::EntryRetention,
+) {
     // Order matches upstream `nitro.config.ts:28` listing
     // (`['cleanup:parts', 'cleanup:merges']`). Tasks operate on
     // disjoint row states (parts: already-merged rows; merges: stale
@@ -296,10 +303,13 @@ async fn run_hourly_cycle(db: Arc<dyn Db>, storage: Arc<dyn StorageAdapter>) {
     // boring.
     let parts_deleted = parts::run(&*db, &*storage, now_ms()).await;
     let merges_reset = merges::run(&*db, now_ms()).await;
+    // After parts: a location measured then counts its merged object only.
+    let repo_size_deleted = repo_size::run(&*db, &*storage, retention.max_repo_size_gb).await;
     tracing::info!(
         parts_deleted,
         merges_reset,
-        "cleanup hourly cycle complete (parts + merges)",
+        repo_size_deleted,
+        "cleanup hourly cycle complete (parts + merges + repo-size)",
     );
 }
 
