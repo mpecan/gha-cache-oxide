@@ -16,6 +16,7 @@ use serde_json::Value;
 const RETENTION: EntryRetention = EntryRetention {
     older_than_days: 90,
     unused_older_than_days: None,
+    max_repo_size_gb: None,
 };
 
 async fn setup() -> (forgejo_common::Server, Runner) {
@@ -200,6 +201,7 @@ async fn unused_expiry_reaps_background_merged_v1_entries() {
     let retention = EntryRetention {
         older_than_days: 30,
         unused_older_than_days: Some(7),
+        max_repo_size_gb: None,
     };
     let report = gha_cache_oxide::tasks::cleanup::run_all(
         srv.db.as_ref(),

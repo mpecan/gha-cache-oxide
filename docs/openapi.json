@@ -61,6 +61,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "repo_size_deleted": {
+            "description": "Entries `cleanup:repo-size` deleted to fit `CACHE_MAX_REPO_SIZE_GB`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "uploads_deleted": {
             "format": "int64",
             "minimum": 0,
@@ -72,7 +78,8 @@
           "uploads_deleted",
           "parts_deleted",
           "entries_deleted",
-          "locations_deleted"
+          "locations_deleted",
+          "repo_size_deleted"
         ],
         "type": "object"
       },
@@ -203,6 +210,14 @@
             "type": "integer"
           },
           "partsDeletedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sizeBytes": {
+            "description": "Bytes the cache object takes in storage. NULL until the\n`cleanup:repo-size` pass measures it.",
             "format": "int64",
             "type": [
               "integer",

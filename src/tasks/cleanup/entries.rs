@@ -39,7 +39,7 @@ pub(super) fn cutoff_ms(now_ms: i64, older_than_days: u32) -> i64 {
     now_ms.saturating_sub(window_ms)
 }
 
-/// Retention windows for `cleanup:cache-entries`.
+/// Retention policy for `cleanup:cache-entries` and `cleanup:repo-size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryRetention {
     /// `CACHE_CLEANUP_OLDER_THAN_DAYS`: reap entries last downloaded
@@ -48,6 +48,9 @@ pub struct EntryRetention {
     /// `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS`: if set, also reap
     /// never-downloaded entries committed before this many days ago.
     pub unused_older_than_days: Option<u32>,
+    /// `CACHE_MAX_REPO_SIZE_GB`: if set, `cleanup:repo-size` caps each
+    /// repository's cache at this many GiB.
+    pub max_repo_size_gb: Option<u32>,
 }
 
 impl EntryRetention {
@@ -55,6 +58,7 @@ impl EntryRetention {
         Self {
             older_than_days: config.cache_cleanup_older_than_days,
             unused_older_than_days: config.cache_cleanup_unused_older_than_days,
+            max_repo_size_gb: config.cache_max_repo_size_gb,
         }
     }
 }
@@ -197,6 +201,7 @@ mod tests {
         EntryRetention {
             older_than_days,
             unused_older_than_days: None,
+            max_repo_size_gb: None,
         }
     }
     use crate::db::entities::CacheEntryCoord;
@@ -358,6 +363,7 @@ mod tests {
         EntryRetention {
             older_than_days,
             unused_older_than_days: Some(unused_days),
+            max_repo_size_gb: None,
         }
     }
 

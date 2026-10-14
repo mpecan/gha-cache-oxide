@@ -33,7 +33,7 @@ use async_trait::async_trait;
 
 use crate::db::entities::{
     CacheEntry, CacheEntryCoord, CacheEntryFilter, MatchRequest, MatchType, MatchedEntry,
-    MergeState, NewUpload, StorageLocation, Upload,
+    MergeState, NewUpload, RepoUsage, StorageLocation, Upload,
 };
 
 pub use mysql::MysqlDb;
@@ -329,6 +329,51 @@ pub trait Db: Send + Sync {
     /// Returns `sqlx::Error` on query failure.
     async fn find_merged_with_parts(
         &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error>;
+
+    // ---- per-repository size cap (`CACHE_MAX_REPO_SIZE_GB`) ------------
+
+    /// Returns one page of `storage_locations` rows that a cache entry
+    /// points at and whose `sizeBytes` has not been measured yet.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_unsized_locations(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error>;
+
+    /// Records the measured `sizeBytes` of a storage location.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on update failure.
+    async fn set_location_size(
+        &self,
+        location_id: &str,
+        size_bytes: i64,
+    ) -> Result<(), sqlx::Error>;
+
+    /// Sums `sizeBytes` per `cache_entries.repoId` and returns the
+    /// repositories whose total is strictly greater than `max_bytes`,
+    /// ordered by `repoId`. Unmeasured locations count as zero.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_repos_over_size(&self, max_bytes: i64) -> Result<Vec<RepoUsage>, sqlx::Error>;
+
+    /// Returns one page of the storage locations behind `repo_id`'s
+    /// cache entries, least recently used first: ordered by the later
+    /// of the entry's `updatedAt` and the location's `lastDownloadedAt`,
+    /// then by location id.
+    ///
+    /// # Errors
+    /// Returns `sqlx::Error` on query failure.
+    async fn find_repo_locations_lru(
+        &self,
+        repo_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<StorageLocation>, sqlx::Error>;

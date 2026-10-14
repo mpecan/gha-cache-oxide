@@ -86,6 +86,7 @@ fn spawn_test(
             retention: gha_cache_oxide::tasks::cleanup::EntryRetention {
                 older_than_days: 90,
                 unused_older_than_days: None,
+                max_repo_size_gb: None,
             },
             schedules,
         },
@@ -224,6 +225,7 @@ async fn maybe_spawn_respects_disable_flag() {
         retention: gha_cache_oxide::tasks::cleanup::EntryRetention {
             older_than_days: 90,
             unused_older_than_days: None,
+            max_repo_size_gb: None,
         },
         schedules: default_test_schedules(),
     };
@@ -236,6 +238,7 @@ async fn maybe_spawn_respects_disable_flag() {
         retention: gha_cache_oxide::tasks::cleanup::EntryRetention {
             older_than_days: 90,
             unused_older_than_days: None,
+            max_repo_size_gb: None,
         },
         schedules: default_test_schedules(),
     };
@@ -398,6 +401,7 @@ async fn three_cadences_each_drive_their_own_tasks() {
             retention: gha_cache_oxide::tasks::cleanup::EntryRetention {
                 older_than_days: 1,
                 unused_older_than_days: None,
+                max_repo_size_gb: None,
             },
             schedules: cleanup::CleanupSchedules {
                 uploads: cleanup::Schedule::Every(Duration::from_millis(50)),

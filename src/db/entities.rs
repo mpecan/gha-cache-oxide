@@ -53,6 +53,20 @@ pub struct StorageLocation {
     #[sqlx(rename = "lastDownloadedAt")]
     #[serde(rename = "lastDownloadedAt")]
     pub last_downloaded_at: Option<i64>,
+    /// Bytes the cache object takes in storage. NULL until the
+    /// `cleanup:repo-size` pass measures it.
+    #[sqlx(rename = "sizeBytes")]
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: Option<i64>,
+}
+
+/// A repository's total cache size, from [`Db::find_repos_over_size`](super::Db::find_repos_over_size).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct RepoUsage {
+    #[sqlx(rename = "repoId")]
+    pub repo_id: String,
+    #[sqlx(rename = "totalBytes")]
+    pub total_bytes: i64,
 }
 
 /// Snapshot of `(mergeStartedAt, mergedAt)` on a `storage_locations` row.

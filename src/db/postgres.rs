@@ -18,7 +18,8 @@ use sqlx::ConnectOptions;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
 use super::entities::{
-    CacheEntry, CacheEntryCoord, CacheEntryFilter, MergeState, NewUpload, StorageLocation, Upload,
+    CacheEntry, CacheEntryCoord, CacheEntryFilter, MergeState, NewUpload, RepoUsage,
+    StorageLocation, Upload,
 };
 use super::{Db, DbError, DbTx, ScopeQuery, escape_like_pattern};
 
@@ -329,6 +330,73 @@ impl Db for PostgresDb {
              ORDER BY id \
              LIMIT $1 OFFSET $2",
         )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn find_unsized_locations(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT sl.* FROM storage_locations sl \
+             WHERE sl.\"sizeBytes\" IS NULL AND EXISTS ( \
+                 SELECT 1 FROM cache_entries ce WHERE ce.\"locationId\" = sl.id \
+             ) \
+             ORDER BY sl.id \
+             LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn set_location_size(
+        &self,
+        location_id: &str,
+        size_bytes: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE storage_locations SET \"sizeBytes\" = $1 WHERE id = $2")
+            .bind(size_bytes)
+            .bind(location_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn find_repos_over_size(&self, max_bytes: i64) -> Result<Vec<RepoUsage>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT ce.\"repoId\" AS \"repoId\", \
+                    CAST(SUM(COALESCE(sl.\"sizeBytes\", 0)) AS BIGINT) AS \"totalBytes\" \
+             FROM cache_entries ce \
+             JOIN storage_locations sl ON sl.id = ce.\"locationId\" \
+             GROUP BY ce.\"repoId\" \
+             HAVING SUM(COALESCE(sl.\"sizeBytes\", 0)) > $1 \
+             ORDER BY ce.\"repoId\"",
+        )
+        .bind(max_bytes)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn find_repo_locations_lru(
+        &self,
+        repo_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StorageLocation>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT sl.* FROM storage_locations sl \
+             JOIN cache_entries ce ON ce.\"locationId\" = sl.id \
+             WHERE ce.\"repoId\" = $1 \
+             ORDER BY GREATEST(ce.\"updatedAt\", COALESCE(sl.\"lastDownloadedAt\", 0)), sl.id \
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(repo_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)

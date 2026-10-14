@@ -40,6 +40,12 @@ pub struct AppConfig {
     /// NULL never expires. Not an upstream knob; act (the Forgejo runner
     /// cache) uses 7 days for unused and 30 for used entries.
     pub cache_cleanup_unused_older_than_days: Option<u32>,
+    /// Per-repository cache size cap in GiB (`CACHE_MAX_REPO_SIZE_GB`).
+    /// When a repository's entries add up to more, the hourly cleanup
+    /// deletes its least recently used entries until it fits, as
+    /// GitHub's hosted cache does at 10 GB. `None` (unset) means no cap.
+    /// Not an upstream knob.
+    pub cache_max_repo_size_gb: Option<u32>,
     pub disable_cleanup_jobs: bool,
     /// Cron schedule for `cleanup:uploads`. Default `*/5 * * * *`,
     /// matching upstream `nitro.config.ts:25`. 5-field upstream syntax
@@ -109,7 +115,14 @@ impl AppConfig {
                 "CACHE_CLEANUP_OLDER_THAN_DAYS",
                 90,
             )?,
-            cache_cleanup_unused_older_than_days: parse_unused_older_than_days()?,
+            cache_cleanup_unused_older_than_days: optional_positive_u32(
+                "CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS",
+                "must be at least 1 (unset it to keep never-downloaded entries)",
+            )?,
+            cache_max_repo_size_gb: optional_positive_u32(
+                "CACHE_MAX_REPO_SIZE_GB",
+                "must be at least 1 (unset it for no size cap)",
+            )?,
             disable_cleanup_jobs: env::bool_or_default("DISABLE_CLEANUP_JOBS", false)?,
             cleanup_uploads_cron: cron_schedule_or_default(
                 "CLEANUP_UPLOADS_SCHEDULE",
@@ -149,24 +162,24 @@ fn parse_proxy_max_body() -> Result<usize, ConfigError> {
     Ok(if raw == 0 { usize::MAX } else { raw })
 }
 
-/// Reads `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS`. Unset/empty → `None`
-/// (feature off). `0` is rejected rather than read as "expire every
-/// never-downloaded entry immediately", which would reap caches before
-/// their first restore.
-fn parse_unused_older_than_days() -> Result<Option<u32>, ConfigError> {
-    const VAR: &str = "CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS";
-    let Some(raw) = env::optional(VAR) else {
+/// Reads an optional positive integer. Unset/empty → `None` (feature
+/// off). `0` is rejected with `zero_reason` rather than read as "expire
+/// everything": for `CACHE_CLEANUP_UNUSED_OLDER_THAN_DAYS` it would reap
+/// caches before their first restore, for `CACHE_MAX_REPO_SIZE_GB` it
+/// would empty every repository's cache each hour.
+fn optional_positive_u32(var: &'static str, zero_reason: &str) -> Result<Option<u32>, ConfigError> {
+    let Some(raw) = env::optional(var) else {
         return Ok(None);
     };
     match raw.parse::<u32>() {
         Ok(0) => Err(ConfigError::Invalid {
-            var: VAR,
+            var,
             value: raw,
-            reason: "must be at least 1 (unset it to keep never-downloaded entries)".into(),
+            reason: zero_reason.into(),
         }),
-        Ok(days) => Ok(Some(days)),
+        Ok(n) => Ok(Some(n)),
         Err(e) => Err(ConfigError::Invalid {
-            var: VAR,
+            var,
             value: raw,
             reason: e.to_string(),
         }),
